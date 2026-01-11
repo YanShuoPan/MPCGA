@@ -1,23 +1,120 @@
-# MPCGA: Multi-Path Cut Generation Algorithm
+# MPCGA: Multipath Chebyshev Greedy Algorithm
 
-A high-dimensional variable selection algorithm using multi-path exploration and automatic cut point generation.
+A tree-based extension of the Chebyshev Greedy Algorithm for high-dimensional prediction and feature selection.
 
 ## Overview
 
-MPCGA (Multi-Path Cut Generation Algorithm) is a variable selection method designed for high-dimensional data. It extends traditional CGA (Cut Generation Algorithm) by:
+**MPCGA (Multipath Chebyshev Greedy Algorithm)** is a feature selection method designed for high-dimensional classification problems. It extends the traditional Chebyshev Greedy Algorithm (CGA) by exploring multiple greedy paths in parallel, integrating a high-dimensional information criterion (HDIC), and applying model trimming to balance predictive accuracy and interpretability.
+
+### Key Features
 
 - **Multi-path exploration**: Explores multiple candidate paths simultaneously instead of greedy single-path selection
 - **Automatic cut point generation**: Discovers nonlinear effects through binary indicator variables
-- **Multiple penalty criteria**: Supports HDAIC, HDBIC for model selection
 - **Model trimming (MTrim)**: Removes redundant paths while preserving prediction accuracy
+- **Multiple penalty criteria**: Supports HDAIC, HDBIC for model selection
+- **Fast split-finding algorithm**: Efficiently identifies optimal cut points without exhaustive enumeration
+- **Handles binary and multinomial outcomes**: Works for both binary and multi-class classification
 
-## Features
+---
 
-- Binary classification (DGP1-3)
-- Multinomial classification (DGP4-5)
-- Handles linear and nonlinear effects
-- Efficient implementation with precomputed sorting
-- Parallel processing support
+## Methodology
+
+### Background: CGA+HDIC
+
+Given a dataset with $n$ observations and $p$ features, CGA sequentially selects features by maximizing the absolute gradient of the empirical loss function:
+
+$$\ell(\beta) := \frac{1}{n}\sum_{t=1}^n \gamma(\beta, y_t, x_t)$$
+
+where $\gamma(\cdot)$ is a differentiable convex loss function (e.g., logistic loss for binary outcomes).
+
+**CGA Algorithm:**
+1. Start with empty feature set $J_0 = \varnothing$
+2. At each step $m$, select feature $j_m = \arg\max_{1\leq j\leq p}|\nabla_j\ell(\hat{\beta}_{J_{m-1}})|$
+3. Update $J_m = J_{m-1} \cup \{j_m\}$ and fit $\hat{\beta}_{J_m}$
+4. Choose optimal model size via HDIC:
+   $$\text{HDIC}(J) = \ell(\hat{\beta}_J) + |J|c_1\omega_n\frac{\log p}{n}$$
+   where $\omega_n = \log n$ (HDBIC) or $\omega_n = 2$ (HDAIC).
+
+### MPCGA Extensions
+
+MPCGA improves upon CGA through three main steps:
+
+#### **Step 1: Recursive Branching**
+
+Instead of selecting only the single largest gradient, MPCGA considers **all features whose gradients exceed a ratio threshold $r$**:
+
+- At each node, compute gradient scores $s_j = |\nabla_j \ell(\hat{\beta}_J)|$
+- Select candidates: $\Omega = \{j : s_j \geq r \cdot \max_j s_j\}$
+- Each selected feature spawns a new branch
+- Continue until path length reaches $K$
+
+Setting $r = 1$ recovers the original CGA. Lower values of $r$ create more diverse paths.
+
+**Duplicate path pruning**: Since the order of feature inclusion doesn't affect subsequent gradients, paths with identical feature sets are eliminated early.
+
+#### **Step 2: Model Refinement via HDIC**
+
+Each path $l$ generates a sequence of nested feature sets:
+$$J_1^l \subset J_2^l \subset \cdots \subset J_K^l$$
+
+For each path, select the optimal model size:
+$$\hat{k}_l = \arg\min_{1\leq k\leq K}\text{HDIC}(J_k^l)$$
+
+This produces a refined collection of candidate models.
+
+#### **Step 3: Model Trimming (MTrim)**
+
+To reduce redundancy, remove paths that are clearly inferior in terms of loss and model size:
+
+1. Find the best model: $J^* = \arg\min_J \ell(\hat{\beta}_J)$ with $\ell_{\min} = \ell(\hat{\beta}_{J^*})$
+2. Retain candidate $m$ only if:
+   $$\ell(\hat{\beta}_{J_m}) - \ell_{\min} \leq c_2 \cdot \max(1, |J^*| - |J_m|)$$
+
+where $c_2$ is a tuning parameter.
+
+**Intuition**: If a model uses more features than $J^*$, it must achieve sufficiently lower loss. If it uses fewer features, a larger tolerance is allowed.
+
+---
+
+## Split-Finding Algorithm for Discrete Outcomes
+
+### Binary Outcomes
+
+For binary outcomes $y_t \in \{0,1\}$, MPCGA expands each continuous feature into indicator features to capture nonlinear effects.
+
+For feature $j$, define indicator features at each cut position $i$:
+$$I_j^{(i)} = \mathbb{I}\{X_j \leq x_{(i),j}\}$$
+
+where $x_{(i),j}$ is the $i$-th order statistic.
+
+**Key insight**: Instead of materializing all $(n-1)p$ indicators, MPCGA uses a **fast split-finding routine** that:
+1. Sorts each feature once: $O(n\log n)$
+2. Scans cumulative gradients to find optimal cut: $O(n)$
+3. Selects at most one best indicator per feature per iteration
+
+### Multinomial Outcomes
+
+For $K+1$ class outcomes, the multinomial logistic objective is:
+$$\ell_K(\beta_1,\ldots,\beta_K) = \frac{1}{n}\sum_{t=1}^n \left[\sum_{k=1}^K \mathbb{I}(y_t=k)\beta_k^\top x_t - \log\left(1+\sum_{k=1}^K e^{\beta_k^\top x_t}\right)\right]$$
+
+The split-finding algorithm applies class-wise, yielding at most one best indicator per feature per class.
+
+---
+
+## MPCGA + Machine Learning
+
+MPCGA can serve as a **feature pre-selector** for machine learning methods:
+
+1. **MPCGA**: Selects relevant features (original + indicator forms)
+2. **Consolidation**: Retain only original features (e.g., if indicator $\mathbb{I}\{X_1 > c\}$ is selected, keep $X_1$)
+3. **ML Input**: Pass consolidated feature set to Random Forest, XGBoost, etc.
+
+**Benefits**:
+- Improves ML interpretability by reducing feature space
+- Maintains or improves predictive accuracy
+- Provides compact, meaningful feature sets
+
+---
 
 ## Installation
 
@@ -32,10 +129,8 @@ Required packages:
 - pandas >= 1.3.0
 - scikit-learn >= 1.0.0
 - scipy >= 1.7.0
-- joblib >= 1.0.0
 
-Optional (for baseline comparisons):
-- xgboost >= 1.5.0
+---
 
 ## Quick Start
 
@@ -45,7 +140,7 @@ Optional (for baseline comparisons):
 from mpcga_algorithm.mpcga_while import fit_model_while
 import numpy as np
 
-# Generate data
+# Generate sample data
 X_train = np.random.randn(300, 1000)
 y_train = np.random.randint(0, 2, 300)
 X_test = np.random.randn(100, 1000)
@@ -56,7 +151,7 @@ models = fit_model_while(
     X_train, y_train,
     K=K,
     max_set=5,           # max candidates per step
-    import_threshold=0.7,
+    import_threshold=0.7, # ratio threshold r
     max_split=3,
     c3=1.0,              # HDBIC penalty coefficient
     penalty_type='HDBIC',
@@ -78,134 +173,122 @@ hdbic_paths = models['path']
 trimmed_paths = Model_Trim(X_train, y_train, hdbic_paths, c2=3.0)
 ```
 
-## Project Structure
+---
 
-```
-MPCGA_clean/
-├── mpcga_algorithm/         # Core algorithm
-│   ├── mpcga_while.py       # ⭐ Main MPCGA algorithm (RECOMMENDED)
-│   ├── mpcga.py             # HDIC_Trim, Model_Trim functions
-│   ├── cga.py               # Traditional CGA baseline
-│   ├── model.py             # Prediction functions
-│   ├── cut_generation_optimized.py  # Cut point generation
-│   ├── utils.py             # Utility functions
-│   ├── distributions.py     # [OPTIONAL] Distribution classes for extensibility
-│   └── mpcga_dist.py        # [OPTIONAL] OOP wrapper (calls mpcga_while internally)
-│
-├── simulations/             # Simulation studies
-│   ├── sim_dgp123_mpcga.py      # DGP1-3 MPCGA methods
-│   ├── sim_dgp123_baseline.py   # DGP1-3 baseline methods
-│   ├── sim_dgp45_mpcga.py       # DGP4-5 MPCGA methods (multinomial)
-│   └── sim_dgp45_baseline.py    # DGP4-5 baseline methods
-│
-├── data_generation.py       # Data generating processes
-├── evaluation_metrics.py    # Evaluation metrics
-├── README.md                # This file
-└── requirements.txt         # Package dependencies
-```
+## Key Parameters
 
-### Notes on Optional Modules
+- **K**: Path length (number of iterations)
+  - Recommended: $K = 3\sqrt{n/\log p}$
 
-**distributions.py** and **mpcga_dist.py** are optional modules:
-- They provide an object-oriented interface for custom distributions
-- Internally, they call `mpcga_while.py` with identical results
-- **Not used** by any simulation scripts (all use `mpcga_while.py` directly)
-- Kept for potential future extensibility (e.g., custom distribution families)
-- See module docstrings for detailed usage examples
+- **r** (`import_threshold`): Gradient ratio threshold
+  - Controls branching diversity
+  - Recommended: 0.7 - 0.8
 
-## Methods
-
-### MPCGA Methods
-
-1. **CGA+HDBIC**: Traditional single-path CGA
-2. **MPCGA+HDBIC**: Multi-path with HDBIC penalty
-3. **MPCGA+HDAIC(OP)**: One-pass greedy variant
-4. **MPCGA+HDBIC+MTrim**: MPCGA with model trimming
-5. **MPCGA+RF/XGB**: Ensemble methods on MPCGA-selected variables
-
-### Baseline Methods
-
-1. **Lasso**: L1-penalized logistic regression
-2. **Adaptive Lasso**: Weighted L1 penalty
-3. **Random Forest (RF)**: With and without Boruta selection
-4. **XGBoost (XGB)**: With and without Boruta selection
-
-## Running Simulations
-
-### DGP1-3 (Binary Classification)
-
-```bash
-# MPCGA methods
-python simulations/sim_dgp123_mpcga.py
-
-# Baseline methods
-python simulations/sim_dgp123_baseline.py
-```
-
-### DGP4-5 (Multinomial Classification)
-
-```bash
-# MPCGA methods
-python simulations/sim_dgp45_mpcga.py
-
-# Baseline methods
-python simulations/sim_dgp45_baseline.py
-```
-
-## Data Generating Processes
-
-### DGP1 (Binary, Linear)
-- 5 true variables with linear effects
-- p = 600 or 1000 total variables
-- n = 300 or 600 samples
-
-### DGP2 (Binary, Cut + Linear)
-- 4 true variables: 2 with cut effects, 2 linear
-- Indicators: I{|x1| > 0.5}, I{|x2| > 0.5}
-
-### DGP3 (Binary, Quadratic + Cut)
-- 4 true variables: 2 quadratic, 2 cut
-- x1^2, x2^2, I{x3 > 0.5}, I{x4 > 0.5}
-
-### DGP4-5 (Multinomial)
-- 3-class classification
-- Similar structure to DGP2-3
-
-## Performance Tuning
-
-### Key Parameters
-
-- **K**: Path length (number of variables to select)
-  - Recommended: `K = int(3 * sqrt(n / log(p)))`
-
-- **c3**: HDBIC penalty coefficient
-  - Larger c3 → stronger penalty → fewer variables
-  - Recommended: 0.8 - 1.0
+- **c1**: HDIC penalty coefficient
+  - Default: 1.0 for HDBIC
 
 - **c2**: MTrim tuning parameter
   - Controls trade-off between model size and loss
   - Recommended: 1.0 - 3.0
 
 - **max_set**: Max candidates per step
-  - More candidates → better exploration but slower
+  - Limits computational complexity
   - Recommended: 3 - 5
 
-- **n_jobs**: Parallel processing
-  - Number of CPU cores to use
-  - Recommended: 8 - 16
+---
+
+## Simulation Studies
+
+The repository includes simulation scripts for various data generating processes:
+
+### Binary Classification (DGP1-3)
+
+- **DGP1**: Linear effects only
+- **DGP2**: Indicator features (cut effects)
+- **DGP3**: Quadratic + indicator features (misspecified)
+
+### Multinomial Classification (DGP4-5)
+
+- **DGP4**: 3-class with linear effects
+- **DGP5**: 3-class with quadratic + indicator features
+
+### Running Simulations
+
+```bash
+# Binary classification
+python simulations/sim_dgp123_mpcga.py
+python simulations/sim_dgp123_baseline.py
+
+# Multinomial classification
+python simulations/sim_dgp45_mpcga.py
+python simulations/sim_dgp45_baseline.py
+```
+
+---
+
+## Project Structure
+
+```
+MPCGA_clean/
+├── mpcga_algorithm/              # Core algorithm
+│   ├── mpcga_while.py           # ⭐ Main MPCGA algorithm
+│   ├── mpcga.py                 # HDIC_Trim, Model_Trim functions
+│   ├── cga.py                   # Traditional CGA baseline
+│   ├── model.py                 # Prediction functions
+│   ├── cut_generation_optimized.py  # Fast split-finding
+│   ├── utils.py                 # Utility functions
+│   ├── distributions.py         # [OPTIONAL] Distribution classes
+│   └── mpcga_dist.py            # [OPTIONAL] OOP wrapper
+│
+├── simulations/                  # Simulation studies
+│   ├── sim_dgp123_mpcga.py      # DGP1-3 MPCGA methods
+│   ├── sim_dgp123_baseline.py   # DGP1-3 baseline methods
+│   ├── sim_dgp45_mpcga.py       # DGP4-5 MPCGA methods
+│   └── sim_dgp45_baseline.py    # DGP4-5 baseline methods
+│
+├── data_generation.py            # Data generating processes
+├── evaluation_metrics.py         # Evaluation metrics
+├── README.md                     # This file
+└── requirements.txt              # Dependencies
+```
+
+---
+
+## Performance Summary
+
+### When to Use MPCGA
+
+✅ **Well-specified linear models** (DGP1): Competitive with CGA+HDBIC, outperforms ML methods
+
+✅ **Models with indicator features** (DGP2): Superior to methods limited to original features (CGA, Lasso)
+
+✅ **Misspecified models** (DGP3): MPCGA+ML achieves best performance with parsimonious feature sets
+
+✅ **Multi-class problems** (DGP4-5): Precise feature selection, enhances downstream ML methods
+
+✅ **Real applications**: Compact feature sets suitable for practical constraints (e.g., sensor development)
+
+---
 
 ## Citation
 
 If you use this code in your research, please cite:
 
 ```
-[Your paper citation here]
+Yan-Shuo Pan, Ching-Kang Ing, Guan-Hua Huang (2025).
+MPCGA: A Tree-Based Chebyshev's Greedy Algorithm.
+[Manuscript in preparation]
 ```
 
-## License
-
-[Add your license here - e.g., MIT, Apache 2.0]
+---
 
 ## Contact
 
-[Your contact information]
+- **Yan-Shuo Pan**: s107024502@m107.nthu.edu.tw
+- **Ching-Kang Ing**: cking@stat.nthu.edu.tw
+
+---
+
+## License
+
+[To be determined]
