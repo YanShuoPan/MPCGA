@@ -101,21 +101,6 @@ The split-finding algorithm applies class-wise, yielding at most one best indica
 
 ---
 
-## MPCGA + Machine Learning
-
-MPCGA can serve as a **feature pre-selector** for machine learning methods:
-
-1. **MPCGA**: Selects relevant features (original + indicator forms)
-2. **Consolidation**: Retain only original features (e.g., if indicator $\mathbb{I}\{X_1 > c\}$ is selected, keep $X_1$)
-3. **ML Input**: Pass consolidated feature set to Random Forest, XGBoost, etc.
-
-**Benefits**:
-- Improves ML interpretability by reducing feature space
-- Maintains or improves predictive accuracy
-- Provides compact, meaningful feature sets
-
----
-
 ## Installation
 
 ### Requirements
