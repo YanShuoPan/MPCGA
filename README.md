@@ -101,6 +101,211 @@ The split-finding algorithm applies class-wise, yielding at most one best indica
 
 ---
 
+## Algorithm Implementation Details
+
+### Computational Control Mechanisms
+
+A practical challenge of MPCGA is the rapid growth of candidate paths. Two complementary mechanisms control complexity:
+
+| Mechanism | Parameter | Description | Impact |
+|-----------|-----------|-------------|--------|
+| **Budgeted Expansion** | `k_max` | Maximum expansion depth (iterations) | Bounds total paths: $M_{\max} = L_c^{k_{\max}}$ |
+| | `L_c` (`max_set`) | Cap on new branches per iteration | Limits branching factor |
+| **Duplicate Pruning** | `path_exist` | Global record of visited feature sets | Eliminates redundant computations |
+
+**Key insight**: Since feature inclusion order doesn't affect gradients, different sequences yielding identical feature sets are pruned immediately.
+
+### Complete MPCGA Workflow
+
+The full procedure integrates all components into a unified framework:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  MPCGA Complete Procedure                                   │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+        ┌─────────────────────────────────┐
+        │  Step 1: Multipath Search + SF  │
+        │  • Initialize: J₀ = {intercept} │
+        │  • While paths exist:           │
+        │    - Fit model on current path  │
+        │    - Apply SF for indicators    │
+        │    - Compute gradients          │
+        │    - Branch on top features     │
+        │    - Prune duplicates           │
+        │  • Output: Path collection 𝒫    │
+        └─────────────────────────────────┘
+                          │
+                          ▼
+        ┌─────────────────────────────────┐
+        │  Step 2: HDIC Refinement        │
+        │  For each path l in 𝒫:          │
+        │    k̂ₗ = argmin HDIC(Jₖˡ)        │
+        │  • Output: Refined models ℋ     │
+        └─────────────────────────────────┘
+                          │
+                          ▼
+        ┌─────────────────────────────────┐
+        │  Step 3: Model Trimming (MTrim) │
+        │  • Find best: J* = argmin ℓ(β̂)  │
+        │  • Retain only if:              │
+        │    ℓ(β̂ⱼ) - ℓ_min ≤ c₂·Δ|J|      │
+        │  • Output: Final models 𝓜       │
+        └─────────────────────────────────┘
+                          │
+                          ▼
+        ┌─────────────────────────────────┐
+        │  Prediction                     │
+        │  • Voting: mode{V̂ᵢ}            │
+        │  • Or probability averaging     │
+        └─────────────────────────────────┘
+```
+
+### Prediction Strategies
+
+After obtaining final models 𝓜 = {M₁, ..., Mₕ}, MPCGA offers two prediction strategies:
+
+<table>
+<tr>
+<th>Strategy</th>
+<th>Formula</th>
+<th>Use Case</th>
+</tr>
+<tr>
+<td><b>Unweighted Voting</b></td>
+<td>
+
+```
+V̂ₜᵢ = argmax p̂ₜᵢₖ  (per model)
+      k
+V̂ₜ = mode{V̂ₜ₁, ..., V̂ₜₕ}
+```
+
+</td>
+<td>Default; robust to outlier models</td>
+</tr>
+<tr>
+<td><b>Probability Averaging</b></td>
+<td>
+
+```
+p̄ₜₖ = (1/h)Σᵢ p̂ₜᵢₖ
+V̂ₜ = argmax p̄ₜₖ
+      k
+```
+
+</td>
+<td>Smoother predictions; better calibration</td>
+</tr>
+</table>
+
+### Complete Algorithm Pseudocode
+
+```python
+"""
+MPCGA: Complete Procedure
+Inputs:
+  X         : Feature matrix (n × p)
+  y         : Response vector
+  K         : Path length
+  r         : Ratio threshold
+  k_max     : Max expansion depth
+  L_c       : Max branches per iteration
+  c1, c2    : Penalty coefficients
+
+Outputs:
+  M         : Final model collection
+"""
+
+# Step 1: Multipath Search with Split-Finding
+path_exist = {}  # Global duplicate tracker
+S = [(J0={intercept}, X)]  # Initialize queue
+P = []  # Path collection
+
+while S is not empty and depth < k_max:
+    (J, X_all) = S.pop()
+
+    # Fit current model
+    β̂_J = fit_logistic(X_all, y, active_set=J)
+
+    # Generate indicators via Split-Finding
+    for j in 1..p:
+        I_j = SplitFinding(X_j, β̂_J, X_all)
+        X_all = X_all ∪ {I_j}
+
+    # Compute gradients for all features (original + indicators)
+    s_c = |∇_c ℓ(β̂_J | X_all)| for all c in X_all
+    M = max(s_c)
+    Ω = {c : s_c ≥ r·M}
+
+    # Branch on top-L_c candidates
+    Ω_top = top_L_c(Ω)
+
+    for c in Ω_top:
+        J_new = J ∪ {c}
+
+        if J_new in path_exist:
+            continue  # Skip duplicate
+        else:
+            path_exist[J_new] = True
+
+        if |J_new| == K:
+            P.append(J_new)  # Complete path
+        else:
+            S.append((J_new, X_all))  # Continue expansion
+
+# Step 2: HDIC Refinement
+H = []
+for path_l in P:
+    # Each path has nested models: J₁ˡ ⊂ J₂ˡ ⊂ ... ⊂ Jₖˡ
+    k̂_l = argmin_{1≤k≤K} HDIC(J_k^l)
+    H.append(J_{k̂_l}^l)
+
+# Step 3: Model Trimming (MTrim)
+J_star = argmin_{J∈H} ℓ(β̂_J)
+ℓ_min = ℓ(β̂_{J_star})
+L_min = |J_star|
+
+M = []
+for J in H:
+    Δloss = ℓ(β̂_J) - ℓ_min
+    Δsize = max(1, L_min - |J|)
+
+    if Δloss ≤ c2 · Δsize:
+        M.append(J)
+
+return M
+```
+
+### MPCGA + Machine Learning Integration
+
+MPCGA can serve as a feature preselector for ML methods (Random Forest, XGBoost):
+
+```
+MPCGA (original + indicator features)
+         │
+         ▼
+   [Feature Consolidation]
+   • If indicator I{Xⱼ ≤ c} selected → retain original Xⱼ
+   • Union all selected originals across paths
+         │
+         ▼
+   Consolidated Feature Set
+         │
+         ▼
+   ML Model (RF/XGB)
+   • ML automatically generates splits
+   • MPCGA provides relevant feature subset
+         │
+         ▼
+   Enhanced Predictions
+```
+
+**Rationale**: ML methods can automatically discover cut points, so we only pass original features identified as important (via their indicators).
+
+---
+
 ## Installation
 
 ### Requirements
