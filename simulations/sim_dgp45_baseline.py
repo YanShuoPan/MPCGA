@@ -7,7 +7,7 @@ This file contains only baseline methods (Lasso, RF, XGB, Boruta)
 
 參數設定:
   - n_iterations: 100 (預設)
-  - n_jobs: 4 (使用 4 個 CPU 核心)
+  - n_jobs: 16 (使用 16 個 CPU 核心)
   - verbose: 10 (顯示進度條)
   - 4 configurations: 2 DGPs × 2 sample sizes
 """
@@ -110,7 +110,7 @@ def run_boruta_rf(x_train, y_train, x_test):
         return None, []
 
     rf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=1)
-    boruta = BorutaPy(rf, n_estimators='auto', max_iter=100, random_state=42, verbose=0)
+    boruta = BorutaPy(rf, n_estimators=100, max_iter=100, random_state=42, verbose=0)
 
     try:
         boruta.fit(x_train, y_train)
@@ -139,7 +139,7 @@ def run_boruta_xgb(x_train, y_train, x_test):
         return None, []
 
     xgb = XGBClassifier(n_estimators=100, max_depth=5, random_state=42, eval_metric='mlogloss', n_jobs=1)
-    boruta = BorutaPy(xgb, n_estimators='auto', max_iter=100, random_state=42, verbose=0)
+    boruta = BorutaPy(xgb, n_estimators=100, max_iter=100, perc=90, random_state=42, verbose=0)
 
     try:
         boruta.fit(x_train, y_train)
@@ -273,7 +273,7 @@ def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration,
 
 
 def run_simulation_parallel(dgp_name, n_train, n_test, p, n_iterations=100, start_seed=123,
-                            methods_to_run=None, save_csv=True, n_jobs=4, verbose=10):
+                            methods_to_run=None, save_csv=True, n_jobs=16, verbose=10):
     """
     Run complete simulation with baseline methods using parallel processing
 
@@ -286,7 +286,7 @@ def run_simulation_parallel(dgp_name, n_train, n_test, p, n_iterations=100, star
         start_seed: starting random seed
         methods_to_run: list of method names to run, or None for all
         save_csv: whether to save results to CSV
-        n_jobs: number of parallel jobs (4 by default)
+        n_jobs: number of parallel jobs (16 by default)
         verbose: verbosity level for joblib (0=silent, 10=progress bar)
 
     Returns:
@@ -409,7 +409,7 @@ if __name__ == "__main__":
             n_iterations=n_iterations,
             methods_to_run=all_methods,
             save_csv=True,
-            n_jobs=4,
+            n_jobs=16,
             verbose=10
         )
 
