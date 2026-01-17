@@ -21,6 +21,10 @@ from data_generation import generate_data_dgp1, generate_data_dgp2, generate_dat
 from evaluation_metrics import compute_metrics, summarize_metrics, print_metrics_summary
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
+from sklearn.model_selection import GridSearchCV
+from sklearn.linear_model import LogisticRegressionCV
+from sklearn.model_selection import StratifiedKFold
 import time
 from datetime import datetime
 import warnings
@@ -78,7 +82,32 @@ def run_lasso(x_train, y_train, x_test):
 
     y_pred = lr.predict(x_test)
     return y_pred, selected_indices
+def run_lasso_cv(x_train, y_train, x_test, cv=5, random_state=42):
+    # 建議用 logspace 掃 C（C 越小正則越強、越稀疏）
+    Cs = np.logspace(-4, 2, 20)
 
+    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
+
+    lr_cv = LogisticRegressionCV(
+        Cs=Cs,
+        cv=skf,
+        penalty='l1',
+        solver='saga',
+        scoring='accuracy',      # 你也可改 'neg_log_loss' / 'roc_auc'
+        max_iter=5000,
+        n_jobs=1,                # 你外層已經 joblib 平行了，這裡建議 1 避免 oversubscribe
+        refit=True,
+        random_state=random_state
+    )
+    lr_cv.fit(x_train, y_train)
+
+    coef = lr_cv.coef_[0]
+    selected_indices = np.where(np.abs(coef) > 1e-6)[0].tolist()
+
+    y_pred = lr_cv.predict(x_test)
+
+    best_C = float(lr_cv.C_[0])  # binary 情況
+    return y_pred, selected_indices, best_C
 
 def run_adaptive_lasso(x_train, y_train, x_test):
     """Run Adaptive LASSO"""
@@ -106,90 +135,227 @@ def run_adaptive_lasso(x_train, y_train, x_test):
     return y_pred, selected_indices
 
 
-def run_random_forest(x_train, y_train, x_test):
-    """Run Random Forest - selects all features with importance > 0"""
-    rf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
-    rf.fit(x_train, y_train)
 
-    importances = rf.feature_importances_
-    # Select all features with importance > 0
+def run_random_forest(x_train, y_train, x_test, cv=5, n_iter=8, random_state=42):
+    """
+    Run Random Forest with RandomizedSearchCV (sampled from original grid).
+    Only n_iter parameter combinations are evaluated instead of full grid.
+
+    Returns:
+        y_pred, selected_indices, best_params
+    """
+
+    # 原本的 grid（保持不變，只是改成抽樣）
+    param_grid = {
+        'n_estimators': [50, 100, 150],
+        'max_depth': [10, 30, 50],
+        'min_samples_split': [2, 5, 10]
+    }
+
+    rf = RandomForestClassifier(random_state=random_state, n_jobs=1)
+
+    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
+
+    rs = RandomizedSearchCV(
+        estimator=rf,
+        param_distributions=param_grid,  # 👈 還是原本的 grid
+        n_iter=n_iter,                    # 👈 只抽 n_iter 組
+        cv=skf,
+        scoring='accuracy',
+        n_jobs=1,                         # 外層已 parallel，這裡保持 1
+        random_state=random_state,
+        verbose=0
+    )
+
+    rs.fit(x_train, y_train)
+
+    best_rf = rs.best_estimator_
+    best_params = rs.best_params_
+
+    importances = best_rf.feature_importances_
     selected_indices = np.where(importances > 0)[0].tolist()
 
-    y_pred = rf.predict(x_test)
-    return y_pred, selected_indices
+    y_pred = best_rf.predict(x_test)
+    return y_pred, selected_indices, best_params
+def run_xgboost(x_train, y_train, x_test, cv=5, n_iter=8, random_state=42):
+    """
+    Run XGBoost with RandomizedSearchCV (sampled from original grid).
+    Only n_iter parameter combinations are evaluated instead of full grid.
 
-
-def run_xgboost(x_train, y_train, x_test):
-    """Run XGBoost - selects all features with importance > 0"""
+    Returns:
+        y_pred, selected_indices, best_params
+    """
     if not XGBOOST_AVAILABLE:
-        return None, []
+        return None, [], None
 
-    xgb = XGBClassifier(n_estimators=100, max_depth=5, random_state=42, eval_metric='logloss')
-    xgb.fit(x_train, y_train)
+    # 原本的 grid（保持不變，只是改成抽樣）
+    param_grid = {
+        'n_estimators': [50, 100, 150],
+        'max_depth': [10, 30, 50],
+        'learning_rate': [0.2, 0.4, 0.6]
+    }
 
-    importances = xgb.feature_importances_
-    # Select all features with importance > 0
+    xgb = XGBClassifier(
+        random_state=random_state,
+        eval_metric='logloss',
+        n_jobs=1
+    )
+
+    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
+
+    rs = RandomizedSearchCV(
+        estimator=xgb,
+        param_distributions=param_grid,  # 👈 還是原本 grid
+        n_iter=n_iter,                    # 👈 只抽 n_iter 組
+        cv=skf,
+        scoring='accuracy',
+        n_jobs=1,                         # 外層已 parallel，這裡保持 1
+        random_state=random_state,
+        verbose=0
+    )
+
+    rs.fit(x_train, y_train)
+
+    best_xgb = rs.best_estimator_
+    best_params = rs.best_params_
+
+    importances = best_xgb.feature_importances_
     selected_indices = np.where(importances > 0)[0].tolist()
 
-    y_pred = xgb.predict(x_test)
-    return y_pred, selected_indices
+    y_pred = best_xgb.predict(x_test)
+    return y_pred, selected_indices, best_params
 
 
-def run_boruta_rf(x_train, y_train, x_test):
-    """Run RF+Boruta for feature selection"""
+def run_boruta_rf(x_train, y_train, x_test, best_params=None):
+    """
+    Run RF+Boruta for feature selection using best_params from CV.
+
+    Returns:
+        y_pred, selected_indices
+        - y_pred: np.ndarray of predicted labels on x_test (or None if failed)
+        - selected_indices: list[int] of selected feature indices (empty if failed)
+    """
     if not BORUTA_AVAILABLE:
         return None, []
 
-    rf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=1)
-    boruta = BorutaPy(rf, n_estimators=100, max_iter=100, random_state=42, verbose=0)
+    import numpy as np
+    from sklearn.ensemble import RandomForestClassifier
+
+    # ---- sanitize inputs ----
+    Xtr = np.asarray(x_train)
+    Xte = np.asarray(x_test)
+    ytr = np.asarray(y_train).ravel()
+
+    # ---- default / merge params ----
+    # Keep it close to your original defaults but a bit more robust.
+    default_params = {
+        "n_estimators": 300,      # base RF for Boruta (can be moderately large)
+        "max_depth": None,
+        "min_samples_split": 2,
+        "min_samples_leaf": 1,
+        "max_features": "sqrt",
+    }
+    if best_params is not None:
+        # best_params from GridSearch may not include all keys; override defaults
+        default_params.update(best_params)
+
+    # Make sure RF is reproducible and doesn't oversubscribe CPU (you already parallelize outside)
+    default_params["random_state"] = 42
+    default_params["n_jobs"] = 1
+
+    # ---- Boruta base estimator ----
+    rf = RandomForestClassifier(**default_params)
+
+    # BorutaPy params:
+    # - n_estimators='auto' lets Boruta decide how many trees each iteration (often better than fixed)
+    # - max_iter controls how long Boruta runs; raise if you want more stable selection
+    boruta = BorutaPy(
+        estimator=rf,
+        n_estimators="auto",
+        max_iter=100,
+        perc=90,             # keep your original XGB-Boruta style strictness; adjust if too harsh
+        random_state=42,
+        verbose=0
+    )
 
     try:
-        boruta.fit(x_train, y_train)
+        boruta.fit(Xtr, ytr)
         selected_indices = np.where(boruta.support_)[0].tolist()
 
-        # Train final model with selected features
+        # ---- Train final RF on selected features (or fallback to all) ----
+        rf_final = RandomForestClassifier(**default_params)
+
         if len(selected_indices) > 0:
-            rf_final = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
-            rf_final.fit(x_train[:, selected_indices], y_train)
-            y_pred = rf_final.predict(x_test[:, selected_indices])
+            rf_final.fit(Xtr[:, selected_indices], ytr)
+            y_pred = rf_final.predict(Xte[:, selected_indices])
         else:
-            # Fallback: use all features
-            selected_indices = list(range(x_train.shape[1]))
-            rf_final = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
-            rf_final.fit(x_train, y_train)
-            y_pred = rf_final.predict(x_test)
+            # Fallback: use all features if Boruta selects none
+            selected_indices = list(range(Xtr.shape[1]))
+            rf_final.fit(Xtr, ytr)
+            y_pred = rf_final.predict(Xte)
 
         return y_pred, selected_indices
-    except Exception as e:
+
+    except Exception:
         return None, []
 
+def run_boruta_xgb(x_train, y_train, x_test, best_params=None):
+    """
+    Run XGB+Boruta for feature selection using best_params from CV.
 
-def run_boruta_xgb(x_train, y_train, x_test):
-    """Run XGB+Boruta for feature selection"""
+    Returns:
+        y_pred, selected_indices
+    """
     if not BORUTA_AVAILABLE or not XGBOOST_AVAILABLE:
         return None, []
 
-    xgb = XGBClassifier(n_estimators=100, max_depth=5, random_state=42, eval_metric='logloss', n_jobs=1)
-    boruta = BorutaPy(xgb, n_estimators=100, max_iter=100, perc=90, random_state=42, verbose=0)
+    # ---- sanitize inputs ----
+    Xtr = np.asarray(x_train)
+    Xte = np.asarray(x_test)
+    ytr = np.asarray(y_train).ravel()
+
+    # If best_params not provided, use default params
+    params = {'n_estimators': 100, 'max_depth': 30, 'learning_rate': 0.3}
+    if best_params is not None:
+        params.update(best_params)
+
+    # Ensure reproducibility and avoid oversubscription (outer loop already parallel)
+    params['random_state'] = 42
+    params['eval_metric'] = 'logloss'
+    params['n_jobs'] = 1
+
+    # Boruta base estimator
+    xgb = XGBClassifier(**params)
+
+    # Prefer n_estimators='auto' so Boruta adapts internal tree count per iteration
+    boruta = BorutaPy(
+        estimator=xgb,
+        n_estimators="auto",
+        max_iter=100,
+        perc=90,
+        random_state=42,
+        verbose=0
+    )
 
     try:
-        boruta.fit(x_train, y_train)
+        boruta.fit(Xtr, ytr)
         selected_indices = np.where(boruta.support_)[0].tolist()
 
-        # Train final model with selected features
+        # Train final model with same params on selected features
+        xgb_final = XGBClassifier(**params)
+
         if len(selected_indices) > 0:
-            xgb_final = XGBClassifier(n_estimators=100, max_depth=5, random_state=42, eval_metric='logloss')
-            xgb_final.fit(x_train[:, selected_indices], y_train)
-            y_pred = xgb_final.predict(x_test[:, selected_indices])
+            xgb_final.fit(Xtr[:, selected_indices], ytr)
+            y_pred = xgb_final.predict(Xte[:, selected_indices])
         else:
             # Fallback: use all features
-            selected_indices = list(range(x_train.shape[1]))
-            xgb_final = XGBClassifier(n_estimators=100, max_depth=5, random_state=42, eval_metric='logloss')
-            xgb_final.fit(x_train, y_train)
-            y_pred = xgb_final.predict(x_test)
+            selected_indices = list(range(Xtr.shape[1]))
+            xgb_final.fit(Xtr, ytr)
+            y_pred = xgb_final.predict(Xte)
 
         return y_pred, selected_indices
-    except Exception as e:
+
+    except Exception:
         return None, []
 
 
@@ -209,6 +375,9 @@ def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration,
     Returns:
         tuple: (iteration, results_dict)
     """
+
+    # Set random seed for reproducibility in parallel execution
+    np.random.seed(seed)
 
     # Generate data
     if dgp_name == 'DGP1':
@@ -234,10 +403,14 @@ def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration,
     def should_run(method_name):
         return 'all' in methods_to_run or method_name in methods_to_run
 
+    # Storage for best_params from CV
+    rf_best_params = None
+    xgb_best_params = None
+
     # Method 1: Lasso
     if should_run('Lasso'):
         try:
-            y_pred, selected = run_lasso(x_train, y_train, x_test)
+            y_pred, selected, best_C = run_lasso_cv(x_train, y_train, x_test)
             if y_pred is not None:
                 results['Lasso'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
         except Exception as e:
@@ -252,10 +425,10 @@ def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration,
         except Exception as e:
             pass
 
-    # Method 3: RF
+    # Method 3: RF (with CV - get best_params for Boruta)
     if should_run('RF'):
         try:
-            y_pred, selected_indices = run_random_forest(x_train, y_train, x_test)
+            y_pred, selected_indices, rf_best_params = run_random_forest(x_train, y_train, x_test)
             if y_pred is not None:
                 # Convert indices to variable names
                 selected_vars = [f'V{i+1}' for i in selected_indices]
@@ -263,10 +436,10 @@ def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration,
         except Exception as e:
             pass
 
-    # Method 4: XGBoost
+    # Method 4: XGBoost (with CV - get best_params for Boruta)
     if should_run('XGB'):
         try:
-            y_pred, selected_indices = run_xgboost(x_train, y_train, x_test)
+            y_pred, selected_indices, xgb_best_params = run_xgboost(x_train, y_train, x_test)
             if y_pred is not None:
                 # Convert indices to variable names
                 selected_vars = [f'V{i+1}' for i in selected_indices]
@@ -274,10 +447,10 @@ def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration,
         except Exception as e:
             pass
 
-    # Method 5: RF+Boruta
+    # Method 5: RF+Boruta (use best_params from RF if available)
     if should_run('RF_Boruta'):
         try:
-            y_pred, selected_indices = run_boruta_rf(x_train, y_train, x_test)
+            y_pred, selected_indices = run_boruta_rf(x_train, y_train, x_test, best_params=rf_best_params)
             if y_pred is not None:
                 # Convert indices to variable names
                 selected_vars = [f'V{i+1}' for i in selected_indices]
@@ -285,10 +458,10 @@ def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration,
         except Exception as e:
             pass
 
-    # Method 6: XGB+Boruta
+    # Method 6: XGB+Boruta (use best_params from XGBoost if available)
     if should_run('XGB_Boruta'):
         try:
-            y_pred, selected_indices = run_boruta_xgb(x_train, y_train, x_test)
+            y_pred, selected_indices = run_boruta_xgb(x_train, y_train, x_test, best_params=xgb_best_params)
             if y_pred is not None:
                 # Convert indices to variable names
                 selected_vars = [f'V{i+1}' for i in selected_indices]
@@ -300,7 +473,7 @@ def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration,
 
 
 def run_simulation_parallel(dgp_name, n_train, n_test, p, n_iterations=100, start_seed=123,
-                            methods_to_run=None, save_csv=True, n_jobs=16, verbose=10):
+                            methods_to_run=None, save_csv=True, n_jobs=4, verbose=10):
     """
     Run complete simulation with baseline methods using parallel processing
 
@@ -375,10 +548,10 @@ def run_simulation_parallel(dgp_name, n_train, n_test, p, n_iterations=100, star
     # Save to CSV
     if save_csv:
         import os
-        os.makedirs('results_new', exist_ok=True)
+        os.makedirs('results', exist_ok=True)
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f'results_new/results_BASELINE_{dgp_name}_n{n_train}_p{p}_{timestamp}.csv'
+        filename = f'results/results_BASELINE_{dgp_name}_n{n_train}_p{p}_{timestamp}.csv'
 
         # Convert to DataFrame
         rows = []
@@ -438,7 +611,7 @@ if __name__ == "__main__":
             n_iterations=n_iterations,
             methods_to_run=all_methods,
             save_csv=True,
-            n_jobs=16,
+            n_jobs=4,
             verbose=10
         )
 
