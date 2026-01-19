@@ -322,6 +322,21 @@ Required packages:
 
 ---
 
+## 🆕 Latest Updates (2026-01-19)
+
+### Version 2.0.0 - Major Refactoring
+
+**Key Improvements**:
+- ✅ **Global Parameter Configuration**: All simulation parameters centralized for easy modification
+- ✅ **Two-Stage Optimization** (DGP4-5): ~50% faster when testing multiple c3 values
+- ✅ **Expanded Methods** (DGP4-5): 8 → 15 methods (now tests both c3=0.8 and c3=1.0)
+- ✅ **Enhanced Ensemble Methods**: Grid search + cross-validation for better hyperparameter tuning
+- ✅ **Complete Code Alignment**: DGP1-3 and DGP4-5 now use identical design patterns
+
+**See [CHANGELOG.md](CHANGELOG.md) for details.**
+
+---
+
 ## Quick Start
 
 ### Basic Usage
@@ -367,6 +382,8 @@ trimmed_paths = Model_Trim(X_train, y_train, hdbic_paths, c2=3.0)
 
 ## Key Parameters
 
+### Algorithm Parameters
+
 - **K**: Path length (number of iterations)
   - Recommended: $K = 3\sqrt{n/\log p}$
 
@@ -374,16 +391,45 @@ trimmed_paths = Model_Trim(X_train, y_train, hdbic_paths, c2=3.0)
   - Controls branching diversity
   - Recommended: 0.7 - 0.8
 
-- **c1**: HDIC penalty coefficient
-  - Default: 1.0 for HDBIC
+- **c3** (c1): HDBIC penalty coefficient
+  - Default: 0.8 - 1.0
+  - Higher values → more penalized → fewer variables
 
 - **c2**: MTrim tuning parameter
   - Controls trade-off between model size and loss
-  - Recommended: 1.0 - 3.0
+  - Recommended: 3.0 - 10.0
 
 - **max_set**: Max candidates per step
   - Limits computational complexity
   - Recommended: 3 - 5
+
+### Global Parameter Configuration (NEW in v2.0)
+
+All simulation scripts now use **centralized global parameters** for easy tuning:
+
+```python
+# Example: Modifying parameters in sim_dgp45_mpcga.py
+
+# HDBIC parameters
+DEFAULT_C3 = 0.8           # Change penalty coefficient
+DEFAULT_MAX_SET = 5        # Change max candidate paths
+DEFAULT_MAX_SPLIT = 5      # Change max splits
+
+# MTrim parameters
+DEFAULT_C2_HIGH = 10.0     # Stricter trimming
+DEFAULT_C2_LOW = 3.0       # Moderate trimming
+
+# Ensemble parameters (grid search)
+DEFAULT_RF_N_ESTIMATORS = [50, 100, 150]
+DEFAULT_RF_MAX_DEPTH = [10, 30, 50]
+DEFAULT_XGB_LEARNING_RATE = [0.2, 0.4, 0.6]
+
+# Cross-validation
+DEFAULT_CV_FOLDS = 5
+DEFAULT_CV_N_ITER = 8
+```
+
+**Location**: All parameters are defined at the top of each simulation file for easy modification.
 
 ---
 

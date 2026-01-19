@@ -109,29 +109,71 @@ def run_lasso_cv(x_train, y_train, x_test, cv=5, random_state=42):
     best_C = float(lr_cv.C_[0])  # binary 情況
     return y_pred, selected_indices, best_C
 
-def run_adaptive_lasso(x_train, y_train, x_test):
-    """Run Adaptive LASSO"""
-    # Step 1: Ridge regression to get weights
-    lr_ridge = LogisticRegression(penalty='l2', solver='lbfgs', max_iter=5000, random_state=42)
-    lr_ridge.fit(x_train, y_train)
-    ridge_coef = np.abs(lr_ridge.coef_[0])
+def run_adaptive_lasso(x_train, y_train, x_test, cv=5, random_state=42):
+    """
+    Run standard Adaptive LASSO (Zou 2006) with CV in both steps - Binary version
 
-    # Create weights (add small epsilon to avoid division by zero)
-    weights = 1.0 / (ridge_coef + 1e-8)
+    Step 1: Lasso with CV to get initial coefficient estimates
+    Step 2: Adaptive Weighted Lasso with CV to select final model
 
-    # Step 2: Weighted LASSO (approximate by rescaling features)
+    Returns:
+        y_pred, selected_indices
+    """
+    # Step 1: Lasso with CV to get initial estimates
+    Cs = np.logspace(-4, 2, 20)
+    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
+
+    lr_lasso_cv = LogisticRegressionCV(
+        Cs=Cs,
+        cv=skf,
+        penalty='l1',
+        solver='saga',
+        scoring='accuracy',
+        max_iter=10000,
+        tol=1e-4,
+        n_jobs=1,
+        refit=True,
+        random_state=random_state
+    )
+    lr_lasso_cv.fit(x_train, y_train)
+
+    # Get Lasso coefficients
+    # For binary: coef_ is (1, n_features) or (n_features,)
+    # Take absolute value for adaptive weights
+    lasso_coef = np.abs(lr_lasso_cv.coef_[0]) if lr_lasso_cv.coef_.ndim == 2 else np.abs(lr_lasso_cv.coef_)
+
+    # Create adaptive weights (gamma=1)
+    # weights = 1 / |lasso_coef|^gamma, gamma=1 is standard
+    weights = 1.0 / (lasso_coef + 1e-8)
+
+    # Step 2: Adaptive Weighted Lasso WITH CV (this is the key!)
+    # Rescale features by adaptive weights
     x_train_weighted = x_train / weights
     x_test_weighted = x_test / weights
 
-    lr_adaptive = LogisticRegression(penalty='l1', solver='saga', max_iter=5000, random_state=42)
-    lr_adaptive.fit(x_train_weighted, y_train)
+    # Do CV again on the weighted features to find optimal lambda
+    lr_adaptive_cv = LogisticRegressionCV(
+        Cs=Cs,
+        cv=skf,
+        penalty='l1',
+        solver='saga',
+        scoring='accuracy',
+        max_iter=10000,
+        tol=1e-4,
+        n_jobs=1,
+        refit=True,
+        random_state=random_state
+    )
+    lr_adaptive_cv.fit(x_train_weighted, y_train)
 
-    coef_weighted = lr_adaptive.coef_[0]
-    # Transform back
+    # Transform back to original scale
+    coef_weighted = lr_adaptive_cv.coef_[0] if lr_adaptive_cv.coef_.ndim == 2 else lr_adaptive_cv.coef_
     coef_original = coef_weighted / weights
+
+    # Select features that are non-zero
     selected_indices = np.where(np.abs(coef_original) > 1e-6)[0].tolist()
 
-    y_pred = lr_adaptive.predict(x_test_weighted)
+    y_pred = lr_adaptive_cv.predict(x_test_weighted)
     return y_pred, selected_indices
 
 

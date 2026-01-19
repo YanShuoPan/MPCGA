@@ -42,6 +42,41 @@ except ImportError:
     print("[WARN] XGBoost not available, XGB methods will be skipped")
 
 
+# ============================================================================
+# GLOBAL PARAMETER CONFIGURATION
+# ============================================================================
+# Modify these parameters to change settings for all MPCGA methods
+
+# HDBIC parameters
+DEFAULT_C3 = 0.8           # HDBIC penalty coefficient (larger = more penalized, fewer variables)
+DEFAULT_MAX_SET = 5        # Maximum number of candidate paths at each step
+DEFAULT_MAX_SPLIT = 3      # Maximum number of splits to explore
+DEFAULT_IMPORT_THRESHOLD = 0.7  # Importance threshold for variable selection
+DEFAULT_PENALTY_TYPE = 'HDBIC'  # Penalty type: 'HDBIC', 'HDAIC', or 'HDHQIC'
+
+# MTrim parameters
+DEFAULT_C2_HIGH = 10.0     # MTrim c2 for stricter trimming (used in MPCGA+MTrim(c2=10))
+DEFAULT_C2_LOW = 3.0       # MTrim c2 for moderate trimming (used in MPCGA+MTrim(c2=3))
+
+# Ensemble parameters
+DEFAULT_RF_N_ESTIMATORS = [50, 100, 150]      # RF n_estimators grid
+DEFAULT_RF_MAX_DEPTH = [10, 30, 50]           # RF max_depth grid
+DEFAULT_RF_MIN_SAMPLES_SPLIT = [2, 5, 10]    # RF min_samples_split grid
+DEFAULT_XGB_N_ESTIMATORS = [50, 100, 150]     # XGB n_estimators grid
+DEFAULT_XGB_MAX_DEPTH = [10, 30, 50]          # XGB max_depth grid
+DEFAULT_XGB_LEARNING_RATE = [0.2, 0.4, 0.6]  # XGB learning_rate grid
+
+# Cross-validation parameters
+DEFAULT_CV_FOLDS = 5       # Number of CV folds
+DEFAULT_CV_N_ITER = 8      # Number of RandomizedSearchCV iterations
+DEFAULT_RANDOM_STATE = 42  # Random state for reproducibility
+
+# Regression type
+DEFAULT_REGRESSION_TYPE = 'multinomial'  # 'binary' or 'multinomial'
+
+# ============================================================================
+
+
 def get_dgp_info(dgp_name):
     """Get DGP information"""
     if dgp_name == 'DGP4':
@@ -95,57 +130,166 @@ def reconstruct_test_features(var_list, x_train, x_test):
     return np.column_stack(features)
 
 
-def run_mpcga_hdbic(x_train, y_train, x_test, K, c3=0.5):
-    """Run MPCGA+HDBIC (returns best model and all candidate info)"""
-    result = fit_model_while(
-        x_train, y_train,
-        K=K,
-        c3=c3,
-        max_set=5,
-        import_threshold=0.7,
-        max_split=3,
-        penalty_type='HDBIC',
-        use_mtrim=False,
-        regression_type='multinomial'
-    )
+def run_mpcga_once(x_train, y_train, K, max_set=None):
+    """Run MPCGA to generate all candidate paths (without HDBIC trimming)
 
-    models = result.get('model', [])
-    vars_list = result.get('main_var', [])
+    This runs the MPCGA algorithm once and returns the raw paths before HDIC penalty.
+    The results can be reused with different c3 values.
 
-    if len(models) == 0:
-        return None, [], result
+    Returns:
+        cga_output: raw output from MPCGA_while with all candidate paths
+        x_train_df: DataFrame version of x_train (needed for HDIC_Trim)
+        p_original: original feature dimension
+    """
+    if max_set is None:
+        max_set = DEFAULT_MAX_SET
 
-    # Reconstruct test features with cut variables (use first model for prediction)
-    X_test_reconstructed = reconstruct_test_features(vars_list[0], x_train, x_test)
-    y_pred = models[0].predict(X_test_reconstructed)
+    try:
+        from mpcga_algorithm.mpcga_while import MPCGA_while
 
-    # Collect selected variables from ALL candidate paths (DGP1-3 approach)
-    selected_vars = []
-    for vars in vars_list:
-        selected_vars.extend(vars)
-    selected_vars = list(set(selected_vars))  # Remove duplicates
+        x_train = np.array(x_train)
+        p_original = x_train.shape[1]
 
-    # Return variable names (not indices) for proper metrics computation
-    # Also return the full result for reuse in MTrim
-    return y_pred, selected_vars, result
+        # Remove duplicate columns
+        x_train_df = pd.DataFrame(x_train, columns=[f"V{i+1}" for i in range(x_train.shape[1])])
+        x_train_df = x_train_df.T.drop_duplicates().T
+
+        # Run MPCGA-while (no penalty applied yet)
+        cga_output = MPCGA_while(x_train_df.values, y_train, K=K, max_set=max_set,
+                                 import_threshold=DEFAULT_IMPORT_THRESHOLD,
+                                 max_split=DEFAULT_MAX_SPLIT,
+                                 regression_type=DEFAULT_REGRESSION_TYPE)
+
+        return cga_output, x_train_df, p_original
+    except Exception as e:
+        return None, None, None
 
 
-def run_mpcga_hdbic_op(x_train, y_train, x_test, K, c3=0.5):
+def apply_hdbic_trim(cga_output, x_train_df, y_train, x_test, p_original, c3=None):
+    """Apply HDBIC trimming with specified c3 to precomputed MPCGA paths
+
+    Args:
+        cga_output: raw output from MPCGA_while
+        x_train_df: DataFrame version of training data
+        y_train: training labels
+        x_test: test features
+        p_original: original feature dimension
+        c3: HDBIC penalty coefficient
+
+    Returns:
+        predictions, selected_vars, result_dict (with 'model', 'main_var', 'path')
+    """
+    if c3 is None:
+        c3 = DEFAULT_C3
+
+    try:
+        from mpcga_algorithm.mpcga import HDIC_Trim
+        from sklearn.linear_model import LogisticRegression
+
+        # Apply HDIC trimming with specified c3
+        output = HDIC_Trim(x_train_df.values, y_train, cga_output, c3=c3,
+                          penalty_type=DEFAULT_PENALTY_TYPE, p_original=p_original)
+
+        # Get unique trimmed paths
+        trim_paths = output['trim']
+        unique_paths = []
+        seen_varsets = []
+
+        for path in trim_paths:
+            varnames = [name for name in path if isinstance(name, str) and name != 'beta0']
+            varset = tuple(sorted(varnames))
+            if varset not in seen_varsets:
+                unique_paths.append(path)
+                seen_varsets.append(varset)
+
+        if len(unique_paths) == 0:
+            return None, [], None
+
+        # Build models from unique paths
+        models = []
+        vars_list = []
+
+        for path in unique_paths:
+            all_varnames = [name for name in path if isinstance(name, str) and name != 'beta0']
+
+            # Reconstruct training features for this path
+            X_train_reconstructed = reconstruct_test_features(all_varnames, x_train_df.values, x_train_df.values)
+
+            # Fit multinomial logistic regression
+            lr = LogisticRegression(fit_intercept=False, max_iter=1000, solver='lbfgs')
+            lr.fit(X_train_reconstructed, y_train)
+
+            models.append(lr)
+            vars_list.append(all_varnames)
+
+        # Predict using ALL models and use majority voting
+        from scipy.stats import mode
+        all_predictions = []
+
+        for i, (model, vars) in enumerate(zip(models, vars_list)):
+            X_test_reconstructed = reconstruct_test_features(vars, x_train_df.values, x_test)
+            y_pred_i = model.predict(X_test_reconstructed)
+            all_predictions.append(y_pred_i)
+
+        # Majority voting across all candidate paths
+        all_predictions = np.array(all_predictions)  # shape: (n_models, n_test)
+        y_pred = mode(all_predictions, axis=0, keepdims=False)[0]  # Take majority vote
+
+        # Collect selected variables from ALL candidate paths
+        selected_vars = []
+        for vars in vars_list:
+            selected_vars.extend(vars)
+        selected_vars = list(set(selected_vars))  # Remove duplicates
+
+        # Return in same format as before (for compatibility with MTrim functions)
+        result_dict = {
+            'model': models,
+            'main_var': vars_list,
+            'path': unique_paths
+        }
+
+        return y_pred, selected_vars, result_dict
+    except Exception as e:
+        return None, [], None
+
+
+def run_mpcga_hdbic(x_train, y_train, x_test, K, c3=None):
+    """Run MPCGA+HDBIC (wrapper for backward compatibility)
+
+    This is a wrapper that runs MPCGA and applies HDBIC in one call.
+    For efficiency when testing multiple c3 values, use run_mpcga_once + apply_hdbic_trim.
+    """
+    if c3 is None:
+        c3 = DEFAULT_C3
+
+    # Two-stage approach
+    cga_output, x_train_df, p_original = run_mpcga_once(x_train, y_train, K)
+
+    if cga_output is None:
+        return None, [], None
+
+    return apply_hdbic_trim(cga_output, x_train_df, y_train, x_test, p_original, c3=c3)
+
+
+def run_mpcga_hdbic_op(x_train, y_train, x_test, K, c3=None):
     """Run MPCGA+HDBIC(OP) - HDBIC with single path (one-pass greedy)
 
     OP = One-Pass, meaning greedy single-path selection.
     This uses max_set=1 and max_split=0 to force greedy behavior.
     """
+    if c3 is None:
+        c3 = DEFAULT_C3
+
     result = fit_model_while(
         x_train, y_train,
         K=K,
         c3=c3,
         max_set=1,  # Single path (greedy)
-        import_threshold=0.7,
+        import_threshold=DEFAULT_IMPORT_THRESHOLD,
         max_split=0,  # No branching
-        penalty_type='HDBIC',
+        penalty_type=DEFAULT_PENALTY_TYPE,
         use_mtrim=False,
-        regression_type='multinomial'
+        regression_type=DEFAULT_REGRESSION_TYPE
     )
 
     models = result.get('model', [])
@@ -203,20 +347,28 @@ def apply_mtrim_to_hdbic_result(hdbic_result, x_train, y_train, x_test, c2):
     if len(trimmed_paths) == 0:
         return None, []
 
-    # Take the first model after MTrim for prediction
-    best_path = trimmed_paths[0]
-    best_vars = [name for name in best_path if isinstance(name, str) and name != 'beta0']
+    # Predict using ALL trimmed models and use majority voting
+    from scipy.stats import mode
+    all_predictions = []
 
-    # Reconstruct training and test features with best model's variables
-    X_train_reconstructed = reconstruct_test_features(best_vars, x_train, x_train)
-    X_test_reconstructed = reconstruct_test_features(best_vars, x_train, x_test)
+    for path in trimmed_paths:
+        path_vars = [name for name in path if isinstance(name, str) and name != 'beta0']
 
-    # Fit the model on training data
-    lr = LogisticRegression(fit_intercept=False, max_iter=1000, solver='lbfgs')
-    lr.fit(X_train_reconstructed, y_train)
+        # Reconstruct features for this path
+        X_train_reconstructed = reconstruct_test_features(path_vars, x_train, x_train)
+        X_test_reconstructed = reconstruct_test_features(path_vars, x_train, x_test)
 
-    # Predict on test data
-    y_pred = lr.predict(X_test_reconstructed)
+        # Fit logistic regression for this path
+        lr = LogisticRegression(fit_intercept=False, max_iter=1000, solver='lbfgs')
+        lr.fit(X_train_reconstructed, y_train)
+
+        # Get predictions
+        y_pred_i = lr.predict(X_test_reconstructed)
+        all_predictions.append(y_pred_i)
+
+    # Majority voting across all trimmed paths
+    all_predictions = np.array(all_predictions)  # shape: (n_models, n_test)
+    y_pred = mode(all_predictions, axis=0, keepdims=False)[0]  # Take majority vote
 
     # Collect selected variables from ALL trimmed paths (DGP1-3 approach)
     selected_vars = []
@@ -228,19 +380,24 @@ def apply_mtrim_to_hdbic_result(hdbic_result, x_train, y_train, x_test, c2):
     return y_pred, selected_vars
 
 
-def run_mpcga_mtrim(x_train, y_train, x_test, K, c3=0.5, c2=10.0):
+def run_mpcga_mtrim(x_train, y_train, x_test, K, c3=None, c2=None):
     """Run MPCGA+HDBIC+MTrim (legacy function, now just wraps the new approach)"""
+    if c3 is None:
+        c3 = DEFAULT_C3
+    if c2 is None:
+        c2 = DEFAULT_C2_HIGH
+
     result = fit_model_while(
         x_train, y_train,
         K=K,
         c3=c3,
-        max_set=5,
-        import_threshold=0.7,
-        max_split=3,
-        penalty_type='HDBIC',
+        max_set=DEFAULT_MAX_SET,
+        import_threshold=DEFAULT_IMPORT_THRESHOLD,
+        max_split=DEFAULT_MAX_SPLIT,
+        penalty_type=DEFAULT_PENALTY_TYPE,
         use_mtrim=True,
         c2=c2,
-        regression_type='multinomial'
+        regression_type=DEFAULT_REGRESSION_TYPE
     )
 
     models = result.get('model', [])
@@ -256,13 +413,16 @@ def run_mpcga_mtrim(x_train, y_train, x_test, K, c3=0.5, c2=10.0):
     return y_pred, vars_list[0]
 
 
-def run_mpcga_mtrim_c2_3(x_train, y_train, x_test, K, c3=0.5):
+def run_mpcga_mtrim_c2_3(x_train, y_train, x_test, K, c3=None):
     """Run MPCGA+HDBIC+MTrim with c2=3"""
-    return run_mpcga_mtrim(x_train, y_train, x_test, K, c3=c3, c2=3.0)
+    if c3 is None:
+        c3 = DEFAULT_C3
+    return run_mpcga_mtrim(x_train, y_train, x_test, K, c3=c3, c2=DEFAULT_C2_LOW)
 
 
-def run_mpcga_ensemble_from_vars(selected_vars, x_train, y_train, x_test, ensemble_type='rf'):
-    """Run ensemble model (RF or XGB) on given selected variables
+def run_mpcga_ensemble_from_vars(selected_vars, x_train, y_train, x_test, ensemble_type='rf',
+                                 cv=None, n_iter=None, random_state=None):
+    """Run ensemble model (RF or XGB) on given selected variables with cross-validation
 
     Args:
         selected_vars: List of selected variable names from MPCGA+MTrim
@@ -270,7 +430,19 @@ def run_mpcga_ensemble_from_vars(selected_vars, x_train, y_train, x_test, ensemb
         y_train: training labels
         x_test: test features
         ensemble_type: 'rf' or 'xgb'
+        cv: number of cross-validation folds (default: DEFAULT_CV_FOLDS)
+        n_iter: number of RandomizedSearchCV iterations (default: DEFAULT_CV_N_ITER)
+        random_state: random state for reproducibility (default: DEFAULT_RANDOM_STATE)
     """
+    from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
+
+    if cv is None:
+        cv = DEFAULT_CV_FOLDS
+    if n_iter is None:
+        n_iter = DEFAULT_CV_N_ITER
+    if random_state is None:
+        random_state = DEFAULT_RANDOM_STATE
+
     if selected_vars is None or len(selected_vars) == 0:
         return None, []
 
@@ -292,32 +464,84 @@ def run_mpcga_ensemble_from_vars(selected_vars, x_train, y_train, x_test, ensemb
     if len(selected_indices) == 0:
         return None, []
 
-    # Train ensemble model on selected features
+    # Extract selected features
+    X_train_selected = x_train[:, selected_indices]
+    X_test_selected = x_test[:, selected_indices]
+
+    # Train ensemble model on selected features WITH CROSS-VALIDATION
     if ensemble_type == 'rf':
-        model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
+        # Parameter grid for RF
+        param_grid = {
+            'n_estimators': DEFAULT_RF_N_ESTIMATORS,
+            'max_depth': DEFAULT_RF_MAX_DEPTH,
+            'min_samples_split': DEFAULT_RF_MIN_SAMPLES_SPLIT
+        }
+
+        rf = RandomForestClassifier(random_state=random_state, n_jobs=1)
+        skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
+
+        rs = RandomizedSearchCV(
+            estimator=rf,
+            param_distributions=param_grid,
+            n_iter=n_iter,
+            cv=skf,
+            scoring='accuracy',
+            n_jobs=1,  # avoid oversubscription (outer loop parallel)
+            random_state=random_state,
+            verbose=0
+        )
+        rs.fit(X_train_selected, y_train)
+        best_model = rs.best_estimator_
+
     elif ensemble_type == 'xgb':
         if not XGBOOST_AVAILABLE:
             return None, []
-        model = XGBClassifier(n_estimators=100, max_depth=5, random_state=42, eval_metric='mlogloss')
+
+        # Parameter grid for XGB
+        param_grid = {
+            'n_estimators': DEFAULT_XGB_N_ESTIMATORS,
+            'max_depth': DEFAULT_XGB_MAX_DEPTH,
+            'learning_rate': DEFAULT_XGB_LEARNING_RATE
+        }
+
+        xgb = XGBClassifier(random_state=random_state, eval_metric='mlogloss', n_jobs=1)
+        skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
+
+        rs = RandomizedSearchCV(
+            estimator=xgb,
+            param_distributions=param_grid,
+            n_iter=n_iter,
+            cv=skf,
+            scoring='accuracy',
+            n_jobs=1,
+            random_state=random_state,
+            verbose=0
+        )
+        rs.fit(X_train_selected, y_train)
+        best_model = rs.best_estimator_
+
     else:
         return None, []
 
-    model.fit(x_train[:, selected_indices], y_train)
-    y_pred = model.predict(x_test[:, selected_indices])
+    # Predict using the best model from CV
+    y_pred = best_model.predict(X_test_selected)
 
     # Convert indices back to variable names for proper metrics computation
     selected_var_names = [f'V{i+1}' for i in selected_indices]
     return y_pred, selected_var_names
 
 
-def run_mpcga_ensemble(x_train, y_train, x_test, ensemble_type='rf', c2=10.0):
+def run_mpcga_ensemble(x_train, y_train, x_test, ensemble_type='rf', c2=None):
     """Run MPCGA+Ensemble (RF or XGB on MPCGA selected variables) - legacy function
 
     This is kept for backwards compatibility but now runs MPCGA+HDBIC+MTrim internally
     """
+    if c2 is None:
+        c2 = DEFAULT_C2_HIGH
+
     # First run MPCGA+HDBIC+MTrim to get selected variables
     K = int(3 * np.sqrt(len(x_train) / np.log(x_train.shape[1])))
-    y_pred_mpcga, selected_vars = run_mpcga_mtrim(x_train, y_train, x_test, K, c3=0.5, c2=c2)
+    y_pred_mpcga, selected_vars = run_mpcga_mtrim(x_train, y_train, x_test, K, c3=DEFAULT_C3, c2=c2)
 
     if y_pred_mpcga is None or len(selected_vars) == 0:
         return None, []
@@ -328,7 +552,7 @@ def run_mpcga_ensemble(x_train, y_train, x_test, ensemble_type='rf', c2=10.0):
 
 def run_mpcga_ensemble_c2_3(x_train, y_train, x_test, ensemble_type='rf'):
     """Run MPCGA+Ensemble with c2=3"""
-    return run_mpcga_ensemble(x_train, y_train, x_test, ensemble_type=ensemble_type, c2=3.0)
+    return run_mpcga_ensemble(x_train, y_train, x_test, ensemble_type=ensemble_type, c2=DEFAULT_C2_LOW)
 
 
 def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration, methods_to_run=None):
@@ -371,109 +595,229 @@ def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration,
     def should_run(method_name):
         return 'all' in methods_to_run or method_name in methods_to_run
 
-    # Run MPCGA+HDBIC once and cache the result for MTrim methods
-    hdbic_result = None
-    hdbic_y_pred = None
-    hdbic_selected = None
+    # OPTIMIZATION: Run MPCGA once and cache the raw paths for reuse with different c3 values
+    cga_output = None
+    x_train_df = None
+    p_original = None
+    hdbic_c08_result = None
+    hdbic_c10_result = None
+    mtrim_c08_c10_selected = None
+    mtrim_c08_c3_selected = None
+    mtrim_c10_c10_selected = None
+    mtrim_c10_c3_selected = None
 
-    # Cache MTrim results for ensemble methods
-    mtrim_c10_selected = None
-    mtrim_c3_selected = None
+    # Check if any HDBIC-based method is needed
+    need_mpcga = (should_run('MPCGA_HDBIC_c08') or should_run('MPCGA_HDBIC_c10') or
+                  should_run('MPCGA_MTrim_c08_c10') or should_run('MPCGA_MTrim_c08_c3') or
+                  should_run('MPCGA_MTrim_c10_c10') or should_run('MPCGA_MTrim_c10_c3') or
+                  should_run('MPCGA_RF_c08_c10') or should_run('MPCGA_XGB_c08_c10') or
+                  should_run('MPCGA_RF_c08_c3') or should_run('MPCGA_XGB_c08_c3') or
+                  should_run('MPCGA_RF_c10_c10') or should_run('MPCGA_XGB_c10_c10') or
+                  should_run('MPCGA_RF_c10_c3') or should_run('MPCGA_XGB_c10_c3'))
 
-    # Method 1: MPCGA+HDBIC
-    if should_run('MPCGA_HDBIC'):
+    if need_mpcga:
         try:
-            hdbic_y_pred, hdbic_selected, hdbic_result = run_mpcga_hdbic(x_train, y_train, x_test, K)
-            if hdbic_y_pred is not None:
-                results['MPCGA+HDBIC'] = compute_metrics(y_test, hdbic_y_pred, hdbic_selected, true_vars, p)
-        except Exception as e:
+            cga_output, x_train_df, p_original = run_mpcga_once(x_train, y_train, K)
+        except Exception:
+            cga_output = None
+
+    # Method 1: MPCGA+HDBIC (c3=0.8) - Apply HDBIC trim to shared MPCGA result
+    if should_run('MPCGA_HDBIC_c08'):
+        try:
+            if cga_output is not None:
+                y_pred, selected, hdbic_c08_result = apply_hdbic_trim(
+                    cga_output, x_train_df, y_train, x_test, p_original, c3=0.8
+                )
+                if y_pred is not None:
+                    results['MPCGA+HDBIC(c3=0.8)'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
+        except Exception:
             pass
 
-    # Method 2: MPCGA+HDBIC(OP) (single path, one-pass greedy)
+    # Method 2: MPCGA+HDBIC (c3=1.0) - Apply HDBIC trim to shared MPCGA result
+    if should_run('MPCGA_HDBIC_c10'):
+        try:
+            if cga_output is not None:
+                y_pred, selected, hdbic_c10_result = apply_hdbic_trim(
+                    cga_output, x_train_df, y_train, x_test, p_original, c3=1.0
+                )
+                if y_pred is not None:
+                    results['MPCGA+HDBIC(c3=1.0)'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
+        except Exception:
+            pass
+
+    # Method 3: MPCGA+HDBIC(OP) (single path, one-pass greedy)
     if should_run('MPCGA_HDBIC_OP'):
         try:
             y_pred, selected = run_mpcga_hdbic_op(x_train, y_train, x_test, K)
             if y_pred is not None:
                 results['MPCGA+HDBIC(OP)'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
-        except Exception as e:
+        except Exception:
             pass
 
-    # For MTrim methods: reuse HDBIC result if available, otherwise run it
-    need_hdbic = (should_run('MPCGA_MTrim_c2_10') or should_run('MPCGA_MTrim_c2_3') or
-                  should_run('MPCGA_RF') or should_run('MPCGA_XGB') or
-                  should_run('MPCGA_RF_c2_3') or should_run('MPCGA_XGB_c2_3'))
+    # For MTrim methods: ensure HDBIC results are available (from shared MPCGA)
+    need_hdbic_c08 = (should_run('MPCGA_MTrim_c08_c10') or should_run('MPCGA_MTrim_c08_c3') or
+                      should_run('MPCGA_RF_c08_c10') or should_run('MPCGA_XGB_c08_c10') or
+                      should_run('MPCGA_RF_c08_c3') or should_run('MPCGA_XGB_c08_c3'))
 
-    if hdbic_result is None and need_hdbic:
-        try:
-            hdbic_y_pred, hdbic_selected, hdbic_result = run_mpcga_hdbic(x_train, y_train, x_test, K)
-        except Exception as e:
-            hdbic_result = None
+    need_hdbic_c10 = (should_run('MPCGA_MTrim_c10_c10') or should_run('MPCGA_MTrim_c10_c3') or
+                      should_run('MPCGA_RF_c10_c10') or should_run('MPCGA_XGB_c10_c10') or
+                      should_run('MPCGA_RF_c10_c3') or should_run('MPCGA_XGB_c10_c3'))
 
-    # Method 3: MPCGA+HDBIC+MTrim (c2=10)
-    if should_run('MPCGA_MTrim_c2_10'):
+    if hdbic_c08_result is None and need_hdbic_c08 and cga_output is not None:
         try:
-            y_pred, mtrim_c10_selected = apply_mtrim_to_hdbic_result(hdbic_result, x_train, y_train, x_test, c2=10.0)
-            if y_pred is not None:
-                results['MPCGA+HDBIC+MTrim(c2=10)'] = compute_metrics(y_test, y_pred, mtrim_c10_selected, true_vars, p)
-        except Exception as e:
+            _, _, hdbic_c08_result = apply_hdbic_trim(
+                cga_output, x_train_df, y_train, x_test, p_original, c3=0.8
+            )
+        except Exception:
+            hdbic_c08_result = None
+
+    if hdbic_c10_result is None and need_hdbic_c10 and cga_output is not None:
+        try:
+            _, _, hdbic_c10_result = apply_hdbic_trim(
+                cga_output, x_train_df, y_train, x_test, p_original, c3=1.0
+            )
+        except Exception:
+            hdbic_c10_result = None
+
+    # Method 4: MPCGA+HDBIC+MTrim (c3=0.8, c2=10)
+    if should_run('MPCGA_MTrim_c08_c10'):
+        try:
+            if hdbic_c08_result is not None:
+                y_pred, mtrim_c08_c10_selected = apply_mtrim_to_hdbic_result(hdbic_c08_result, x_train, y_train, x_test, c2=DEFAULT_C2_HIGH)
+                if y_pred is not None:
+                    results['MPCGA+HDBIC+MTrim(c3=0.8,c2=10)'] = compute_metrics(y_test, y_pred, mtrim_c08_c10_selected, true_vars, p)
+        except Exception:
             pass
 
-    # Method 4: MPCGA+HDBIC+MTrim (c2=3)
-    if should_run('MPCGA_MTrim_c2_3'):
+    # Method 5: MPCGA+HDBIC+MTrim (c3=0.8, c2=3)
+    if should_run('MPCGA_MTrim_c08_c3'):
         try:
-            y_pred, mtrim_c3_selected = apply_mtrim_to_hdbic_result(hdbic_result, x_train, y_train, x_test, c2=3.0)
-            if y_pred is not None:
-                results['MPCGA+HDBIC+MTrim(c2=3)'] = compute_metrics(y_test, y_pred, mtrim_c3_selected, true_vars, p)
-        except Exception as e:
+            if hdbic_c08_result is not None:
+                y_pred, mtrim_c08_c3_selected = apply_mtrim_to_hdbic_result(hdbic_c08_result, x_train, y_train, x_test, c2=DEFAULT_C2_LOW)
+                if y_pred is not None:
+                    results['MPCGA+HDBIC+MTrim(c3=0.8,c2=3)'] = compute_metrics(y_test, y_pred, mtrim_c08_c3_selected, true_vars, p)
+        except Exception:
+            pass
+
+    # Method 6: MPCGA+HDBIC+MTrim (c3=1.0, c2=10)
+    if should_run('MPCGA_MTrim_c10_c10'):
+        try:
+            if hdbic_c10_result is not None:
+                y_pred, mtrim_c10_c10_selected = apply_mtrim_to_hdbic_result(hdbic_c10_result, x_train, y_train, x_test, c2=DEFAULT_C2_HIGH)
+                if y_pred is not None:
+                    results['MPCGA+HDBIC+MTrim(c3=1.0,c2=10)'] = compute_metrics(y_test, y_pred, mtrim_c10_c10_selected, true_vars, p)
+        except Exception:
+            pass
+
+    # Method 7: MPCGA+HDBIC+MTrim (c3=1.0, c2=3)
+    if should_run('MPCGA_MTrim_c10_c3'):
+        try:
+            if hdbic_c10_result is not None:
+                y_pred, mtrim_c10_c3_selected = apply_mtrim_to_hdbic_result(hdbic_c10_result, x_train, y_train, x_test, c2=DEFAULT_C2_LOW)
+                if y_pred is not None:
+                    results['MPCGA+HDBIC+MTrim(c3=1.0,c2=3)'] = compute_metrics(y_test, y_pred, mtrim_c10_c3_selected, true_vars, p)
+        except Exception:
             pass
 
     # Ensure MTrim results are available for ensemble methods
-    if mtrim_c10_selected is None and (should_run('MPCGA_RF') or should_run('MPCGA_XGB')):
+    if mtrim_c08_c10_selected is None and (should_run('MPCGA_RF_c08_c10') or should_run('MPCGA_XGB_c08_c10')):
         try:
-            _, mtrim_c10_selected = apply_mtrim_to_hdbic_result(hdbic_result, x_train, y_train, x_test, c2=10.0)
-        except Exception as e:
+            if hdbic_c08_result is not None:
+                _, mtrim_c08_c10_selected = apply_mtrim_to_hdbic_result(hdbic_c08_result, x_train, y_train, x_test, c2=DEFAULT_C2_HIGH)
+        except Exception:
             pass
 
-    if mtrim_c3_selected is None and (should_run('MPCGA_RF_c2_3') or should_run('MPCGA_XGB_c2_3')):
+    if mtrim_c08_c3_selected is None and (should_run('MPCGA_RF_c08_c3') or should_run('MPCGA_XGB_c08_c3')):
         try:
-            _, mtrim_c3_selected = apply_mtrim_to_hdbic_result(hdbic_result, x_train, y_train, x_test, c2=3.0)
-        except Exception as e:
+            if hdbic_c08_result is not None:
+                _, mtrim_c08_c3_selected = apply_mtrim_to_hdbic_result(hdbic_c08_result, x_train, y_train, x_test, c2=DEFAULT_C2_LOW)
+        except Exception:
             pass
 
-    # Method 5: MPCGA+RF (c2=10) - uses MTrim(c2=10) selected variables
-    if should_run('MPCGA_RF'):
+    if mtrim_c10_c10_selected is None and (should_run('MPCGA_RF_c10_c10') or should_run('MPCGA_XGB_c10_c10')):
         try:
-            y_pred, selected = run_mpcga_ensemble_from_vars(mtrim_c10_selected, x_train, y_train, x_test, 'rf')
+            if hdbic_c10_result is not None:
+                _, mtrim_c10_c10_selected = apply_mtrim_to_hdbic_result(hdbic_c10_result, x_train, y_train, x_test, c2=DEFAULT_C2_HIGH)
+        except Exception:
+            pass
+
+    if mtrim_c10_c3_selected is None and (should_run('MPCGA_RF_c10_c3') or should_run('MPCGA_XGB_c10_c3')):
+        try:
+            if hdbic_c10_result is not None:
+                _, mtrim_c10_c3_selected = apply_mtrim_to_hdbic_result(hdbic_c10_result, x_train, y_train, x_test, c2=DEFAULT_C2_LOW)
+        except Exception:
+            pass
+
+    # Method 8: MPCGA+RF (c3=0.8, c2=10)
+    if should_run('MPCGA_RF_c08_c10'):
+        try:
+            y_pred, selected = run_mpcga_ensemble_from_vars(mtrim_c08_c10_selected, x_train, y_train, x_test, 'rf')
             if y_pred is not None:
-                results['MPCGA+RF'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
-        except Exception as e:
+                results['MPCGA+RF(c3=0.8,c2=10)'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
+        except Exception:
             pass
 
-    # Method 6: MPCGA+XGB (c2=10) - uses MTrim(c2=10) selected variables
-    if should_run('MPCGA_XGB'):
+    # Method 9: MPCGA+XGB (c3=0.8, c2=10)
+    if should_run('MPCGA_XGB_c08_c10'):
         try:
-            y_pred, selected = run_mpcga_ensemble_from_vars(mtrim_c10_selected, x_train, y_train, x_test, 'xgb')
+            y_pred, selected = run_mpcga_ensemble_from_vars(mtrim_c08_c10_selected, x_train, y_train, x_test, 'xgb')
             if y_pred is not None:
-                results['MPCGA+XGB'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
-        except Exception as e:
+                results['MPCGA+XGB(c3=0.8,c2=10)'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
+        except Exception:
             pass
 
-    # Method 7: MPCGA+RF (c2=3) - uses MTrim(c2=3) selected variables
-    if should_run('MPCGA_RF_c2_3'):
+    # Method 10: MPCGA+RF (c3=0.8, c2=3)
+    if should_run('MPCGA_RF_c08_c3'):
         try:
-            y_pred, selected = run_mpcga_ensemble_from_vars(mtrim_c3_selected, x_train, y_train, x_test, 'rf')
+            y_pred, selected = run_mpcga_ensemble_from_vars(mtrim_c08_c3_selected, x_train, y_train, x_test, 'rf')
             if y_pred is not None:
-                results['MPCGA+RF(c2=3)'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
-        except Exception as e:
+                results['MPCGA+RF(c3=0.8,c2=3)'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
+        except Exception:
             pass
 
-    # Method 8: MPCGA+XGB (c2=3) - uses MTrim(c2=3) selected variables
-    if should_run('MPCGA_XGB_c2_3'):
+    # Method 11: MPCGA+XGB (c3=0.8, c2=3)
+    if should_run('MPCGA_XGB_c08_c3'):
         try:
-            y_pred, selected = run_mpcga_ensemble_from_vars(mtrim_c3_selected, x_train, y_train, x_test, 'xgb')
+            y_pred, selected = run_mpcga_ensemble_from_vars(mtrim_c08_c3_selected, x_train, y_train, x_test, 'xgb')
             if y_pred is not None:
-                results['MPCGA+XGB(c2=3)'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
-        except Exception as e:
+                results['MPCGA+XGB(c3=0.8,c2=3)'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
+        except Exception:
+            pass
+
+    # Method 12: MPCGA+RF (c3=1.0, c2=10)
+    if should_run('MPCGA_RF_c10_c10'):
+        try:
+            y_pred, selected = run_mpcga_ensemble_from_vars(mtrim_c10_c10_selected, x_train, y_train, x_test, 'rf')
+            if y_pred is not None:
+                results['MPCGA+RF(c3=1.0,c2=10)'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
+        except Exception:
+            pass
+
+    # Method 13: MPCGA+XGB (c3=1.0, c2=10)
+    if should_run('MPCGA_XGB_c10_c10'):
+        try:
+            y_pred, selected = run_mpcga_ensemble_from_vars(mtrim_c10_c10_selected, x_train, y_train, x_test, 'xgb')
+            if y_pred is not None:
+                results['MPCGA+XGB(c3=1.0,c2=10)'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
+        except Exception:
+            pass
+
+    # Method 14: MPCGA+RF (c3=1.0, c2=3)
+    if should_run('MPCGA_RF_c10_c3'):
+        try:
+            y_pred, selected = run_mpcga_ensemble_from_vars(mtrim_c10_c3_selected, x_train, y_train, x_test, 'rf')
+            if y_pred is not None:
+                results['MPCGA+RF(c3=1.0,c2=3)'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
+        except Exception:
+            pass
+
+    # Method 15: MPCGA+XGB (c3=1.0, c2=3)
+    if should_run('MPCGA_XGB_c10_c3'):
+        try:
+            y_pred, selected = run_mpcga_ensemble_from_vars(mtrim_c10_c3_selected, x_train, y_train, x_test, 'xgb')
+            if y_pred is not None:
+                results['MPCGA+XGB(c3=1.0,c2=3)'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
+        except Exception:
             pass
 
     return iteration, results
@@ -515,10 +859,16 @@ def run_simulation_parallel(dgp_name, n_train, n_test, p, n_iterations=100, star
     print(f"  K = {int(3 * np.sqrt(n_train / np.log(p)))}")
     print(f"  Parallel jobs: {n_jobs}")
 
-    # Initialize results storage (8 MPCGA methods)
-    all_method_names = ['MPCGA+HDBIC', 'MPCGA+HDBIC(OP)',
-                        'MPCGA+HDBIC+MTrim(c2=10)', 'MPCGA+HDBIC+MTrim(c2=3)',
-                        'MPCGA+RF', 'MPCGA+XGB', 'MPCGA+RF(c2=3)', 'MPCGA+XGB(c2=3)']
+    # Initialize results storage (15 MPCGA methods)
+    all_method_names = [
+        'MPCGA+HDBIC(c3=0.8)', 'MPCGA+HDBIC(c3=1.0)', 'MPCGA+HDBIC(OP)',
+        'MPCGA+HDBIC+MTrim(c3=0.8,c2=10)', 'MPCGA+HDBIC+MTrim(c3=0.8,c2=3)',
+        'MPCGA+HDBIC+MTrim(c3=1.0,c2=10)', 'MPCGA+HDBIC+MTrim(c3=1.0,c2=3)',
+        'MPCGA+RF(c3=0.8,c2=10)', 'MPCGA+XGB(c3=0.8,c2=10)',
+        'MPCGA+RF(c3=0.8,c2=3)', 'MPCGA+XGB(c3=0.8,c2=3)',
+        'MPCGA+RF(c3=1.0,c2=10)', 'MPCGA+XGB(c3=1.0,c2=10)',
+        'MPCGA+RF(c3=1.0,c2=3)', 'MPCGA+XGB(c3=1.0,c2=3)'
+    ]
     all_results = {method: [] for method in all_method_names}
 
     # Run iterations in parallel
@@ -587,16 +937,23 @@ if __name__ == "__main__":
 
     # Settings
     n_iterations = 100
-    all_methods = ['MPCGA_HDBIC', 'MPCGA_HDBIC_OP', 'MPCGA_MTrim_c2_10', 'MPCGA_MTrim_c2_3',
-                   'MPCGA_RF', 'MPCGA_XGB', 'MPCGA_RF_c2_3', 'MPCGA_XGB_c2_3']
+    all_methods = [
+        'MPCGA_HDBIC_c08', 'MPCGA_HDBIC_c10', 'MPCGA_HDBIC_OP',
+        'MPCGA_MTrim_c08_c10', 'MPCGA_MTrim_c08_c3',
+        'MPCGA_MTrim_c10_c10', 'MPCGA_MTrim_c10_c3',
+        'MPCGA_RF_c08_c10', 'MPCGA_XGB_c08_c10',
+        'MPCGA_RF_c08_c3', 'MPCGA_XGB_c08_c3',
+        'MPCGA_RF_c10_c10', 'MPCGA_XGB_c10_c10',
+        'MPCGA_RF_c10_c3', 'MPCGA_XGB_c10_c3'
+    ]
 
     print("=" * 80)
     print("MPCGA methods simulation - 4 configurations")
     print("=" * 80)
-    print(f"Methods: {len(all_methods)} MPCGA variants")
-    print(f"  - MPCGA core: HDBIC, HDBIC(OP) (2 methods)")
-    print(f"  - MPCGA+MTrim: c2=10, c2=3 (2 methods)")
-    print(f"  - MPCGA+Ensemble: RF(c2=10), XGB(c2=10), RF(c2=3), XGB(c2=3) (4 methods)")
+    print(f"Methods: {len(all_methods)} MPCGA variants (with 2-stage optimization)")
+    print(f"  - MPCGA core: HDBIC(c3=0.8), HDBIC(c3=1.0), HDBIC(OP) (3 methods)")
+    print(f"  - MPCGA+MTrim: (c3=0.8,c2=10), (c3=0.8,c2=3), (c3=1.0,c2=10), (c3=1.0,c2=3) (4 methods)")
+    print(f"  - MPCGA+Ensemble: RF/XGB × (c3=0.8,c2=10), (c3=0.8,c2=3), (c3=1.0,c2=10), (c3=1.0,c2=3) (8 methods)")
     print()
 
     # Define 4 simulation configurations

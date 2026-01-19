@@ -109,6 +109,75 @@ def run_lasso(x_train, y_train, x_test, cv=5, random_state=42):
 
     return y_pred, selected_indices, best_C
 
+
+def run_adaptive_lasso(x_train, y_train, x_test, cv=5, random_state=42):
+    """
+    Run standard Adaptive LASSO (Zou 2006) with CV in both steps
+
+    Step 1: Lasso with CV to get initial coefficient estimates
+    Step 2: Adaptive Weighted Lasso with CV to select final model
+
+    Returns:
+        y_pred, selected_indices
+    """
+    # Step 1: Lasso with CV to get initial estimates
+    Cs = np.logspace(-4, 2, 20)
+    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
+
+    lr_lasso_cv = LogisticRegressionCV(
+        Cs=Cs,
+        cv=skf,
+        penalty='l1',
+        solver='saga',
+        scoring='accuracy',
+        max_iter=10000,
+        tol=1e-4,
+        n_jobs=1,
+        refit=True,
+        random_state=random_state
+    )
+    lr_lasso_cv.fit(x_train, y_train)
+
+    # Get Lasso coefficients
+    # For multinomial: coef_ is (n_classes, n_features)
+    # Take the mean absolute value across classes for adaptive weights
+    lasso_coef = np.mean(np.abs(lr_lasso_cv.coef_), axis=0)
+
+    # Create adaptive weights (gamma=1)
+    # weights = 1 / |lasso_coef|^gamma, gamma=1 is standard
+    weights = 1.0 / (lasso_coef + 1e-8)
+
+    # Step 2: Adaptive Weighted Lasso WITH CV (this is the key!)
+    # Rescale features by adaptive weights
+    x_train_weighted = x_train / weights
+    x_test_weighted = x_test / weights
+
+    # Do CV again on the weighted features to find optimal lambda
+    lr_adaptive_cv = LogisticRegressionCV(
+        Cs=Cs,
+        cv=skf,
+        penalty='l1',
+        solver='saga',
+        scoring='accuracy',
+        max_iter=10000,
+        tol=1e-4,
+        n_jobs=1,
+        refit=True,
+        random_state=random_state
+    )
+    lr_adaptive_cv.fit(x_train_weighted, y_train)
+
+    # Transform back to original scale
+    coef_weighted = lr_adaptive_cv.coef_  # (n_classes, n_features)
+    coef_original = coef_weighted / weights
+
+    # Select features that are non-zero in ANY class
+    non_zero_mask = np.any(np.abs(coef_original) > 1e-6, axis=0)
+    selected_indices = np.where(non_zero_mask)[0].tolist()
+
+    y_pred = lr_adaptive_cv.predict(x_test_weighted)
+    return y_pred, selected_indices
+
 def run_random_forest(x_train, y_train, x_test, cv=5, n_iter=8, random_state=42):
     """
     RF with RandomizedSearchCV sampled from the original discrete grid.
@@ -360,6 +429,17 @@ def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration,
         except Exception as e:
             pass
 
+    # Method 1b: Adaptive Lasso
+    if should_run('Adaptive_Lasso'):
+        try:
+            y_pred, selected_indices = run_adaptive_lasso(x_train, y_train, x_test)
+            if y_pred is not None:
+                # Convert indices to variable names
+                selected_vars = [f'V{i+1}' for i in selected_indices]
+                results['Adaptive Lasso'] = compute_metrics(y_test, y_pred, selected_vars, true_vars, p)
+        except Exception as e:
+            pass
+
     # Method 2: RF (with CV - get best_params for Boruta)
     if should_run('RF'):
         try:
@@ -443,7 +523,7 @@ def run_simulation_parallel(dgp_name, n_train, n_test, p, n_iterations=100, star
     print(f"  Parallel jobs: {n_jobs}")
 
     # Initialize results storage
-    all_method_names = ['True Model', 'Lasso', 'RF', 'XGBoost', 'RF+Boruta', 'XGB+Boruta']
+    all_method_names = ['True Model', 'Lasso', 'Adaptive Lasso', 'RF', 'XGBoost', 'RF+Boruta', 'XGB+Boruta']
     all_results = {method: [] for method in all_method_names}
 
     # Run iterations in parallel
@@ -512,13 +592,13 @@ if __name__ == "__main__":
 
     # Settings
     n_iterations = 100
-    all_methods = ['Lasso', 'RF', 'XGB', 'RF_Boruta', 'XGB_Boruta']
+    all_methods = ['Lasso', 'Adaptive_Lasso', 'RF', 'XGB', 'RF_Boruta', 'XGB_Boruta']
 
     print("=" * 80)
     print("Baseline methods simulation - 4 configurations")
     print("=" * 80)
     print(f"Methods: {len(all_methods)} baseline methods")
-    print(f"  - Penalized: Lasso (1 method)")
+    print(f"  - Penalized: Lasso, Adaptive Lasso (2 methods)")
     print(f"  - Tree-based: RF, XGB, RF+Boruta, XGB+Boruta (4 methods)")
     print()
 
