@@ -322,19 +322,6 @@ Required packages:
 
 ---
 
-## 🆕 Latest Updates (2026-01-19)
-
-### Version 2.0.0 - Major Refactoring
-
-**Key Improvements**:
-- ✅ **Global Parameter Configuration**: All simulation parameters centralized for easy modification
-- ✅ **Two-Stage Optimization** (DGP4-5): ~50% faster when testing multiple c3 values
-- ✅ **Expanded Methods** (DGP4-5): 8 → 15 methods (now tests both c3=0.8 and c3=1.0)
-- ✅ **Enhanced Ensemble Methods**: Grid search + cross-validation for better hyperparameter tuning
-- ✅ **Complete Code Alignment**: DGP1-3 and DGP4-5 now use identical design patterns
-
-**See [CHANGELOG.md](CHANGELOG.md) for details.**
-
 ---
 
 ## Quick Start
@@ -358,7 +345,7 @@ models = fit_model_while(
     max_set=5,           # max candidates per step
     import_threshold=0.7, # ratio threshold r
     max_split=3,
-    c3=1.0,              # HDBIC penalty coefficient
+    c3=0.7,              # HDBIC penalty coefficient
     penalty_type='HDBIC',
     use_mtrim=False
 )
@@ -392,32 +379,29 @@ trimmed_paths = Model_Trim(X_train, y_train, hdbic_paths, c2=3.0)
   - Recommended: 0.7 - 0.8
 
 - **c3** (c1): HDBIC penalty coefficient
-  - Default: 0.8 - 1.0
+  - Default: 0.7
   - Higher values → more penalized → fewer variables
 
 - **c2**: MTrim tuning parameter
   - Controls trade-off between model size and loss
-  - Recommended: 3.0 - 10.0
+  - Default: 3.0
 
 - **max_set**: Max candidates per step
   - Limits computational complexity
   - Recommended: 3 - 5
 
-### Global Parameter Configuration (NEW in v2.0)
+### Global Parameter Configuration
 
-All simulation scripts now use **centralized global parameters** for easy tuning:
+All simulation scripts use **centralized global parameters** for easy tuning:
 
 ```python
-# Example: Modifying parameters in sim_dgp45_mpcga.py
-
 # HDBIC parameters
-DEFAULT_C3 = 0.8           # Change penalty coefficient
-DEFAULT_MAX_SET = 5        # Change max candidate paths
-DEFAULT_MAX_SPLIT = 5      # Change max splits
+DEFAULT_C3 = 0.7           # HDBIC penalty coefficient
+DEFAULT_MAX_SET = 3        # Max candidate paths per step
+DEFAULT_MAX_SPLIT = 3      # Max splits to explore
 
 # MTrim parameters
-DEFAULT_C2_HIGH = 10.0     # Stricter trimming
-DEFAULT_C2_LOW = 3.0       # Moderate trimming
+DEFAULT_C2 = 3.0           # MTrim tolerance
 
 # Ensemble parameters (grid search)
 DEFAULT_RF_N_ESTIMATORS = [50, 100, 150]

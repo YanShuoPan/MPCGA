@@ -1,30 +1,5 @@
 """
-Distribution classes for MPCGA - Object-Oriented Interface (Optional)
-
-IMPORTANT: This module is NOT used by the main MPCGA implementation.
-           It provides an OPTIONAL object-oriented interface for future extensibility.
-
-Current Status:
-    - mpcga_while.py directly uses sklearn.linear_model.LogisticRegression
-    - All simulations use mpcga_while.py without this module
-    - This module is designed for potential future extensions
-
-Purpose:
-    - Defines an extensible interface for custom distributions
-    - Allows easy addition of new distribution families (e.g., Poisson, Gaussian)
-    - Provides a clean API through mpcga_dist.py wrapper
-
-Usage:
-    Option 1 (Recommended - Direct):
-        from mpcga_algorithm.mpcga_while import fit_model_while
-        models = fit_model_while(X, Y, K=25, regression_type='binary')
-
-    Option 2 (Using Distribution objects):
-        from mpcga_algorithm.mpcga_dist import fit_model
-        from mpcga_algorithm.distributions import BinaryLogistic
-        dist = BinaryLogistic()
-        models = fit_model(X, Y, K=25, distribution=dist)
-        # Note: This internally calls fit_model_while() with the same result
+Distribution classes for MPCGA
 
 Each distribution implements:
 - fit(X, Y): Fit model and return coefficients

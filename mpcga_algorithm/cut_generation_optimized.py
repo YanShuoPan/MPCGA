@@ -99,7 +99,7 @@ def best_cut2_precomputed(cache_info, X_current, Y, gam):
     col_name = f"{name}_cut_{best_idx + 1}"
 
     # 計算重要性
-    importance = float(np.abs(cut_variable.T @ residuals.reshape(-1, 1)))
+    importance = np.abs(cut_variable.T @ residuals.reshape(-1, 1)).item()
 
     return {
         'm': pd.DataFrame(cut_variable, columns=[col_name]),
@@ -156,17 +156,15 @@ def best_cut2_set_precomputed(cut_info_cache, X_current, Y, gam,
             sum_exp = np.sum(exp_eta_all, axis=1, keepdims=True)  # (n, 1)
             probs = exp_eta_all / sum_exp  # (n, K)
 
-            # Compute "working residuals" for cut point selection
-            # For multinomial, we aggregate residuals across non-reference classes
-            # Use the residual from class 1 (similar to binary regression approach)
-            # residual_k = I(y == k) - prob_k
-            # For simplicity, use a weighted combination
-            residuals = np.zeros(n)
+            # Compute residuals for each class separately
+            # residual_k = I(y == k) - prob_k for each non-reference class
+            # Keep as (n, K-1) matrix to avoid gradient cancellation across classes
+            residuals = np.zeros((n, K-1))
 
             for k in range(1, K):  # Classes 1, 2, ... (skip reference class 0)
                 y_k = (Y == k).astype(float)
                 prob_k = probs[:, k]
-                residuals += (y_k - prob_k)  # Signed residual
+                residuals[:, k-1] = y_k - prob_k  # Store in corresponding column
 
             # DEBUG
             # print(f"[DEBUG] Multinomial residuals: min={np.min(residuals):.3f}, max={np.max(residuals):.3f}, mean={np.mean(residuals):.3f}")
@@ -232,7 +230,9 @@ def best_cut2_precomputed_shared_residuals(cache_info, residuals):
 
     Args:
         cache_info: 預計算的固定資訊
-        residuals: 已计算的残差向量 (共享使用)
+        residuals: 已计算的残差
+            - Binary: (n,) 向量
+            - Multinomial: (n, K-1) 矩陣
 
     Returns:
         Dictionary with best cut matrix and value
@@ -245,25 +245,164 @@ def best_cut2_precomputed_shared_residuals(cache_info, residuals):
     end_points = cache_info['end_points']
     name = cache_info['name']
 
-    # 使用预先计算的残差（已排序）
-    residuals_sorted = residuals[sorted_idx]
+    # 判斷是否為 multinomial (殘差是矩陣)
+    is_multinomial = len(residuals.shape) == 2
 
-    # 累積和（動態）
-    cumsum_residuals = np.cumsum(residuals_sorted)
-    cumsum_at_ends = cumsum_residuals[end_points]
+    if is_multinomial:
+        # Multinomial: 對每個類別分別計算累積和，選擇總重要性最大的切點
+        K_minus_1 = residuals.shape[1]
 
-    # 選擇最佳切點（動態 - 依賴當前殘差！）
-    best_idx = np.argmax(np.abs(cumsum_at_ends))
-    best_cutpoint = v_sorted[end_points[best_idx]]
+        # 計算每個類別的累積和的絕對值，然後加總
+        cumsum_all_classes = None
+
+        for k in range(K_minus_1):
+            residuals_k = residuals[:, k]
+            residuals_k_sorted = residuals_k[sorted_idx]
+
+            cumsum_residuals_k = np.cumsum(residuals_k_sorted)
+            cumsum_at_ends_k = cumsum_residuals_k[end_points]
+
+            if cumsum_all_classes is None:
+                # 初始化：使用第一個類別的絕對值
+                cumsum_all_classes = np.abs(cumsum_at_ends_k)
+            else:
+                # 累加每個類別的絕對值
+                cumsum_all_classes += np.abs(cumsum_at_ends_k)
+
+        # 選擇總重要性最大的切點
+        best_idx = np.argmax(cumsum_all_classes)
+        best_cutpoint = v_sorted[end_points[best_idx]]
+
+    else:
+        # Binary: 原有邏輯
+        residuals_sorted = residuals[sorted_idx]
+
+        # 累積和（動態）
+        cumsum_residuals = np.cumsum(residuals_sorted)
+        cumsum_at_ends = cumsum_residuals[end_points]
+
+        # 選擇最佳切點
+        best_idx = np.argmax(np.abs(cumsum_at_ends))
+        best_cutpoint = v_sorted[end_points[best_idx]]
 
     # 創建切點變數
     cut_variable = (v > best_cutpoint).astype(float).reshape(-1, 1)
     col_name = f"{name}_cut_{best_idx + 1}"
 
     # 計算重要性
-    importance = float(np.abs(cut_variable.T @ residuals.reshape(-1, 1)))
+    if is_multinomial:
+        # Multinomial: 對每個類別分別計算內積，取絕對值後加總
+        importance = 0
+        for k in range(residuals.shape[1]):
+            importance += np.abs(cut_variable.T @ residuals[:, k].reshape(-1, 1)).item()
+    else:
+        # Binary: 原有邏輯
+        importance = np.abs(cut_variable.T @ residuals.reshape(-1, 1)).item()
 
     return {
         'm': pd.DataFrame(cut_variable, columns=[col_name]),
         'value': importance
     }
+
+
+def _parse_cut_name(name):
+    """Parse cut variable name to extract variable name and cut index
+
+    Args:
+        name: cut variable name (e.g., "V1_cut_3")
+
+    Returns:
+        Tuple of (variable_name, cut_index) or (None, None) if invalid
+    """
+    parts = name.split('_cut_')
+
+    if len(parts) != 2:
+        return None, None
+
+    var_name = parts[0]
+    try:
+        cut_idx = int(parts[1])
+        return var_name, cut_idx
+    except ValueError:
+        return None, None
+
+
+def generate_test_cut(v, name, test):
+    """Generate cut for test data based on training cut name
+
+    Args:
+        v: training variable vector
+        name: cut variable name
+        test: test data DataFrame
+
+    Returns:
+        DataFrame with cut variable for test data
+    """
+    var_name, cut_idx = _parse_cut_name(name)
+
+    if var_name is None:
+        return None
+
+    # Get unique values and cutpoint
+    v_uni = np.unique(v)
+
+    if cut_idx > len(v_uni):
+        return None
+
+    cutpoint = v_uni[cut_idx - 1]
+
+    # Extract test variable
+    if var_name in test.columns:
+        test_var = test[var_name].values
+    else:
+        # Try to extract by index (e.g., "V1" -> column 0)
+        try:
+            col_idx = int(var_name.replace('V', '')) - 1
+            test_var = test.iloc[:, col_idx].values
+        except (ValueError, IndexError):
+            return None
+
+    # Apply cutpoint
+    cut_variable = (test_var > cutpoint).astype(float).reshape(-1, 1)
+    return pd.DataFrame(cut_variable, columns=[name])
+
+
+def generate_test_cut_all(X_cut, names, test):
+    """Generate all cuts for test data
+
+    Args:
+        X_cut: training data DataFrame
+        names: list of cut variable names
+        test: test data DataFrame
+
+    Returns:
+        DataFrame with all cut variables for test data
+    """
+    results = []
+
+    for name in names:
+        var_name, _ = _parse_cut_name(name)
+
+        if var_name is None:
+            continue
+
+        # Get training variable
+        if var_name in X_cut.columns:
+            train_var = X_cut[var_name].values
+        else:
+            # Try to extract by index
+            try:
+                col_idx = int(var_name.replace('V', '')) - 1
+                train_var = X_cut.iloc[:, col_idx].values
+            except (ValueError, IndexError):
+                continue
+
+        # Generate test cut
+        result = generate_test_cut(train_var, name, test)
+        if result is not None:
+            results.append(result)
+
+    if len(results) == 0:
+        return pd.DataFrame()
+
+    return pd.concat(results, axis=1)

@@ -121,7 +121,9 @@ def MPCGA_while(X, Y, K, max_set=5, import_threshold=0.7, max_split=2, regressio
         X_all = X_all_df.values
 
         # Current variables are at the beginning
-        current_indices = list(range(X_current.shape[1]))
+        # After drop_duplicates, some current columns may have been removed
+        # (e.g., identical cut indicators in multinomial). Use unique count.
+        current_indices = list(range(X_current_df.T.drop_duplicates().shape[0]))
 
         # Standardization
         X_standardized = X_all.copy()
@@ -227,7 +229,7 @@ def fit_model_while(X, Y, K=25, c3=0.3, max_set=3, import_threshold=0.7, max_spl
         Dictionary with fitted models
     """
     from .mpcga import HDIC_Trim, Model_Trim
-    from .cut_generation import generate_test_cut_all
+    from .cut_generation_optimized import generate_test_cut_all
 
     X = np.array(X)
     Y = np.array(Y)

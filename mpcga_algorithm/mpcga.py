@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from .utils import fd
-from .cut_generation import best_cut2_set, generate_test_cut_all
+from .cut_generation_optimized import best_cut2_set_precomputed as best_cut2_set, generate_test_cut_all
 
 
 def CGA_tree2(X, X_current, Y, gam, likelihood, Jhat, k, K, max_set=3, import_threshold=0.8, max_split=5):
@@ -189,6 +189,8 @@ def HDIC_Trim(X, Y, CGA_output, c3=1, penalty_type='HDAIC', p_original=None):
             - HDAIC: penalty = c3 * k * log(p)
             - HDHQIC: penalty = c3 * k * log(log(n)) * log(p)
             - HDBIC: penalty = c3 * k * log(n) * log(p)
+            For multinomial (K_classes > 2), the number of parameters per variable
+            is multiplied by (K_classes - 1)
         p_original: optional, original number of variables (for penalty calculation)
 
     Returns:
@@ -231,12 +233,15 @@ def HDIC_Trim(X, Y, CGA_output, c3=1, penalty_type='HDAIC', p_original=None):
         # Use p_original if provided, otherwise use X.shape[1]
         p_for_penalty = p_original if p_original is not None else X.shape[1]
 
+        # Use np.arange(K) for number of variables at each step
+        k_vars = np.arange(K)
+
         if penalty_type == 'HDBIC':
-            penalty = c3 * np.arange(K) * np.log(n) * np.log(p_for_penalty)
+            penalty = c3 * k_vars * np.log(n) * np.log(p_for_penalty)
         elif penalty_type == 'HDHQIC':
-            penalty = c3 * np.arange(K) * np.log(np.log(n)) * np.log(p_for_penalty)
+            penalty = c3 * k_vars * np.log(np.log(n)) * np.log(p_for_penalty)
         else:  # HDAIC
-            penalty = c3 * np.arange(K) * np.log(p_for_penalty)
+            penalty = c3 * k_vars * np.log(p_for_penalty)
 
         hdic = -2 * likelihood + penalty
         kn_hat = np.argmin(hdic)
@@ -300,7 +305,7 @@ def Model_Trim(X, Y, trimmed_paths, c2=1.0, regression_type='binary', return_inf
             - kept_models: list of kept model info
             - removed_models: list of removed model info
     """
-    from .cut_generation import generate_test_cut_all
+    from .cut_generation_optimized import generate_test_cut_all
     from .utils import llik_multinomial
     from sklearn.linear_model import LogisticRegression
 

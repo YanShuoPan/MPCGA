@@ -8,7 +8,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import confusion_matrix
 from .mpcga import MPCGA_HDIC
-from .cut_generation import generate_test_cut_all
+from .cut_generation_optimized import generate_test_cut_all
 
 
 def fit_model(X, Y, K=25, c3=0.3, max_set=3, import_threshold=0.95, max_split=2, penalty_type='HDAIC'):

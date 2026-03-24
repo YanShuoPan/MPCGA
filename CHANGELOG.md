@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2026-03-24] - Simplification for Paper
+
+### Overview
+Simplified simulation parameters to match the paper settings: **c3=0.7** (HDBIC penalty) and **c2=3** (MTrim tolerance).
+
+### Changed
+
+#### Parameter Simplification
+- **c3**: Unified to single value `0.7` (was testing both 0.8 and 1.0)
+- **c2**: Unified to single value `3.0` (was testing both 3.0 and 10.0)
+- Removed all `DEFAULT_C3_LOW/HIGH`, `DEFAULT_C2_LOW/HIGH` constants
+
+#### Method Reduction
+- **DGP1-3**: 10 methods -> 7 methods (True Model + CGA+HDBIC + 5 MPCGA variants)
+- **DGP4-5**: 15 methods -> 6 methods (True Model + 5 MPCGA variants)
+- Final method set: MPCGA+HDBIC, MPCGA-S, MPCGA+HDBIC+MTrim, MPCGA+RF, MPCGA+XGB
+
+#### Code Quality
+- Unified `cut_generation_optimized.py` as the sole cut generation module (removed dependency on `cut_generation.py`)
+- Fixed True Model prediction for binary DGPs (1D probability handling)
+- Updated all documentation to reflect simplified parameters
+
+---
+
 ## [2026-01-19] - Major Refactoring Update
 
 ### 🎯 Overview
@@ -154,6 +178,11 @@ Potential enhancements for future versions:
 ---
 
 ## Version History
+
+### [2026-03-24] v2.1.0
+- Simplified parameters to paper settings (c3=0.7, c2=3)
+- Reduced methods to final paper set
+- Unified cut generation module
 
 ### [2026-01-19] v2.0.0
 - Major refactoring with global parameters and two-stage optimization

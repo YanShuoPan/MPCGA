@@ -85,17 +85,16 @@ MPCGA_clean/
 ### 2️⃣ 模擬研究 (`simulations/`)
 
 #### `sim_dgp123_mpcga.py` - DGP1-3 MPCGA
-- **方法數量**: 10 個
+- **方法數量**: 7 個 (含 True Model)
 - **配置**: 6 種 (DGP1-3 × n=300/600)
 - **迭代次數**: 100
 - **包含方法**:
   1. CGA+HDBIC
-  2. MPCGA+HDBIC(c3=0.8)
-  3. MPCGA+HDBIC(c3=1.0)
-  4. MPCGA+HDAIC(OP)
-  5. MPCGA+HDBIC+MTrim(c3=0.8)
-  6. MPCGA+HDBIC+MTrim(c3=1.0)
-  7-10. MPCGA+RF/XGB (c3=0.8/1.0)
+  2. MPCGA+HDBIC (c3=0.7)
+  3. MPCGA-S
+  4. MPCGA+HDBIC+MTrim (c2=3)
+  5. MPCGA+RF
+  6. MPCGA+XGB
 
 #### `sim_dgp123_baseline.py` - DGP1-3 Baseline
 - **方法數量**: 6 個
@@ -105,12 +104,19 @@ MPCGA_clean/
   2. Adaptive Lasso
   3. Random Forest
   4. XGBoost
-  5. RF + Boruta
-  6. XGB + Boruta
+  5. Boruta + RF
+  6. Boruta + XGB
 
 #### `sim_dgp45_mpcga.py` - DGP4-5 MPCGA
+- **方法數量**: 6 個 (含 True Model)
 - **特色**: Multinomial classification (3 classes)
-- **方法**: 類似 DGP1-3
+- **配置**: 4 種 (DGP4-5 × n=400/600)
+- **包含方法**:
+  1. MPCGA+HDBIC (c3=0.7)
+  2. MPCGA-S
+  3. MPCGA+HDBIC+MTrim (c2=3)
+  4. MPCGA+RF
+  5. MPCGA+XGB
 
 #### `sim_dgp45_baseline.py` - DGP4-5 Baseline
 - **特色**: Multinomial baseline methods

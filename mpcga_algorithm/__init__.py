@@ -6,11 +6,11 @@ A tree-based feature selection algorithm for logistic regression
 # Import from utils
 from .utils import llik, fd, MLE, gam_all, replace_fun
 
-# Import from cut_generation
-from .cut_generation import (
-    generate_cut,
-    best_cut2,
-    best_cut2_set,
+# Import from cut_generation_optimized
+from .cut_generation_optimized import (
+    precompute_cut_info,
+    best_cut2_precomputed,
+    best_cut2_set_precomputed,
     generate_test_cut,
     generate_test_cut_all
 )
@@ -32,8 +32,8 @@ __all__ = [
     # Utils
     'llik', 'fd', 'MLE', 'gam_all', 'replace_fun',
 
-    # Cut generation
-    'generate_cut', 'best_cut2', 'best_cut2_set',
+    # Cut generation (optimized)
+    'precompute_cut_info', 'best_cut2_precomputed', 'best_cut2_set_precomputed',
     'generate_test_cut', 'generate_test_cut_all',
 
     # CGA

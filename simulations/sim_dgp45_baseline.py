@@ -1,6 +1,6 @@
 """
 Baseline Methods Simulation for DGP4 and DGP5 (Multinomial)
-This file contains only baseline methods (Lasso, RF, XGB, Boruta)
+This file contains baseline methods + True Model + CGA+HDBIC
 
 使用方法:
   python simulations/sim_dgp4_dgp5_baseline.py
@@ -10,15 +10,28 @@ This file contains only baseline methods (Lasso, RF, XGB, Boruta)
   - n_jobs: 16 (使用 16 個 CPU 核心)
   - verbose: 10 (顯示進度條)
   - 4 configurations: 2 DGPs × 2 sample sizes
+  - USE_CORRELATED_FEATURES: False/True (是否使用相關性特徵)
 """
+
+# ============================================================
+# CONFIGURATION: 是否使用相關性特徵
+# ============================================================
+USE_CORRELATED_FEATURES = True  # 改成 True 會使用相關性特徵
 
 import sys
 import os
+
+# Add project root to Python path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from data_generation import generate_data_dgp4, generate_data_dgp5
 from evaluation_metrics import compute_metrics, summarize_metrics, print_metrics_summary
+from mpcga_algorithm.cga import fit_model_cga, predict_cga
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import GridSearchCV
@@ -108,6 +121,40 @@ def run_lasso(x_train, y_train, x_test, cv=5, random_state=42):
         best_C = float(lr_cv.C_[0, 0])
 
     return y_pred, selected_indices, best_C
+
+
+def run_cga_hdbic(x_train, y_train, x_test, K, p):
+    """Run traditional CGA+HDBIC (OLD VERSION - no cut generation)
+
+    This uses the original CGA algorithm that only considers original variables,
+    without automatic cut point generation. This provides a fair baseline comparison.
+
+    Args:
+        x_train: training features
+        y_train: training labels
+        x_test: test features
+        K: model complexity parameter (NOT number of classes!)
+            Formula: K = int(3 * sqrt(n_train / log(p)))
+        p: total number of features
+
+    Returns:
+        predictions: predicted labels
+        selected_vars: list of selected variable names (e.g., ['V1', 'V2', ...])
+    """
+    try:
+        # Use original CGA with c3=1 (as in old version)
+        models = fit_model_cga(x_train, y_train, K=K, c3=1, penalty_type='HDBIC')
+        predictions = predict_cga(x_train, np.zeros(len(x_test)), x_test, models)
+
+        # Collect selected variables (already in correct format from CGA)
+        selected_vars = []
+        for vars_list in models['main_var']:
+            selected_vars.extend(vars_list)
+        selected_vars = list(set(selected_vars))
+
+        return predictions, selected_vars
+    except Exception as e:
+        return None, []
 
 
 def run_adaptive_lasso(x_train, y_train, x_test, cv=5, random_state=42):
@@ -255,7 +302,7 @@ def run_xgboost(x_train, y_train, x_test, cv=5, n_iter=8, random_state=42):
 
 def run_boruta_rf(x_train, y_train, x_test, best_params=None):
     """
-    RF+Boruta for feature selection using best_params from CV.
+    Boruta+RF for feature selection using best_params from CV.
     Returns: y_pred, selected_indices
     """
     if not BORUTA_AVAILABLE:
@@ -311,7 +358,7 @@ def run_boruta_rf(x_train, y_train, x_test, best_params=None):
 
 def run_boruta_xgb(x_train, y_train, x_test, best_params=None):
     """
-    XGB+Boruta for feature selection using best_params from CV.
+    Boruta+XGB for feature selection using best_params from CV.
     Returns: y_pred, selected_indices
     """
     if not BORUTA_AVAILABLE or not XGBOOST_AVAILABLE:
@@ -379,11 +426,11 @@ def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration,
     # Set random seed for reproducibility in parallel execution
     np.random.seed(seed)
 
-    # Generate data
+    # Generate data (use global USE_CORRELATED_FEATURES)
     if dgp_name == 'DGP4':
-        data = generate_data_dgp4(n_train, n_test, p, seed=seed)
+        data = generate_data_dgp4(n_train, n_test, p, seed=seed, correlated=USE_CORRELATED_FEATURES)
     elif dgp_name == 'DGP5':
-        data = generate_data_dgp5(n_train, n_test, p, seed=seed)
+        data = generate_data_dgp5(n_train, n_test, p, seed=seed, correlated=USE_CORRELATED_FEATURES)
     else:
         raise ValueError(f"Unknown DGP: {dgp_name}")
 
@@ -410,7 +457,7 @@ def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration,
     if should_run('True_Model') or should_run('all'):
         try:
             if true_probs_test is not None:
-                # Predict using true probabilities
+                # Predict using true probabilities (multinomial: take argmax)
                 y_pred_true = np.argmax(true_probs_test, axis=1)
                 # True model uses all true variables - convert indices to variable names
                 selected_var_names = [f'V{i+1}' for i in true_vars]
@@ -420,16 +467,30 @@ def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration,
         except Exception as e:
             print(f"  [ERROR] Iteration {iteration}: True Model failed: {e}")
 
-    # Method 1: Lasso
+    # Method 1: CGA+HDBIC (Traditional CGA without cut generation)
+    if should_run('CGA_HDBIC') or should_run('all'):
+        try:
+            # Calculate K parameter (model complexity, NOT number of classes!)
+            K = int(3 * np.sqrt(n_train / np.log(p)))
+            y_pred_cga, selected_cga = run_cga_hdbic(x_train, y_train, x_test, K, p)
+            if y_pred_cga is not None:
+                # CGA already returns variable names in correct format
+                results['CGA+HDBIC'] = compute_metrics(y_test, y_pred_cga, selected_cga, true_vars, p)
+        except Exception as e:
+            pass
+
+    # Method 3: Lasso
     if should_run('Lasso'):
         try:
             y_pred, selected,_ = run_lasso(x_train, y_train, x_test)
             if y_pred is not None:
-                results['Lasso'] = compute_metrics(y_test, y_pred, selected, true_vars, p)
+                # Convert indices to variable names
+                selected_names = [f'V{i+1}' for i in selected]
+                results['Lasso'] = compute_metrics(y_test, y_pred, selected_names, true_vars, p)
         except Exception as e:
             pass
 
-    # Method 1b: Adaptive Lasso
+    # Method 4: Adaptive Lasso
     if should_run('Adaptive_Lasso'):
         try:
             y_pred, selected_indices = run_adaptive_lasso(x_train, y_train, x_test)
@@ -440,7 +501,7 @@ def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration,
         except Exception as e:
             pass
 
-    # Method 2: RF (with CV - get best_params for Boruta)
+    # Method 5: RF (with CV - get best_params for Boruta)
     if should_run('RF'):
         try:
             y_pred, selected_indices, rf_best_params = run_random_forest(x_train, y_train, x_test)
@@ -451,7 +512,7 @@ def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration,
         except Exception as e:
             pass
 
-    # Method 3: XGBoost (with CV - get best_params for Boruta)
+    # Method 6: XGBoost (with CV - get best_params for Boruta)
     if should_run('XGB'):
         try:
             y_pred, selected_indices, xgb_best_params = run_xgboost(x_train, y_train, x_test)
@@ -462,25 +523,25 @@ def run_single_iteration_parallel(dgp_name, n_train, n_test, p, seed, iteration,
         except Exception as e:
             pass
 
-    # Method 4: RF+Boruta (use best_params from RF if available)
-    if should_run('RF_Boruta'):
+    # Method 7: Boruta+RF (use best_params from RF if available)
+    if should_run('Boruta_RF'):
         try:
             y_pred, selected_indices = run_boruta_rf(x_train, y_train, x_test, best_params=rf_best_params)
             if y_pred is not None:
                 # Convert indices to variable names
                 selected_vars = [f'V{i+1}' for i in selected_indices]
-                results['RF+Boruta'] = compute_metrics(y_test, y_pred, selected_vars, true_vars, p)
+                results['Boruta+RF'] = compute_metrics(y_test, y_pred, selected_vars, true_vars, p)
         except Exception as e:
             pass
 
-    # Method 5: XGB+Boruta (use best_params from XGBoost if available)
-    if should_run('XGB_Boruta'):
+    # Method 8: Boruta+XGB (use best_params from XGBoost if available)
+    if should_run('Boruta_XGB'):
         try:
             y_pred, selected_indices = run_boruta_xgb(x_train, y_train, x_test, best_params=xgb_best_params)
             if y_pred is not None:
                 # Convert indices to variable names
                 selected_vars = [f'V{i+1}' for i in selected_indices]
-                results['XGB+Boruta'] = compute_metrics(y_test, y_pred, selected_vars, true_vars, p)
+                results['Boruta+XGB'] = compute_metrics(y_test, y_pred, selected_vars, true_vars, p)
         except Exception as e:
             pass
 
@@ -523,7 +584,7 @@ def run_simulation_parallel(dgp_name, n_train, n_test, p, n_iterations=100, star
     print(f"  Parallel jobs: {n_jobs}")
 
     # Initialize results storage
-    all_method_names = ['True Model', 'Lasso', 'Adaptive Lasso', 'RF', 'XGBoost', 'RF+Boruta', 'XGB+Boruta']
+    all_method_names = ['True Model', 'CGA+HDBIC', 'Lasso', 'Adaptive Lasso', 'RF', 'XGBoost', 'Boruta+RF', 'Boruta+XGB']
     all_results = {method: [] for method in all_method_names}
 
     # Run iterations in parallel
@@ -563,10 +624,12 @@ def run_simulation_parallel(dgp_name, n_train, n_test, p, n_iterations=100, star
     # Save to CSV
     if save_csv:
         import os
-        os.makedirs('results', exist_ok=True)
+        # Choose output directory based on correlation setting
+        output_dir = 'results_correlated' if USE_CORRELATED_FEATURES else 'results'
+        os.makedirs(output_dir, exist_ok=True)
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f'results/results_BASELINE_{dgp_name}_n{n_train}_p{p}_{timestamp}.csv'
+        filename = f'{output_dir}/results_BASELINE_{dgp_name}_n{n_train}_p{p}_{timestamp}.csv'
 
         # Convert to DataFrame
         rows = []
@@ -592,14 +655,16 @@ if __name__ == "__main__":
 
     # Settings
     n_iterations = 100
-    all_methods = ['Lasso', 'Adaptive_Lasso', 'RF', 'XGB', 'RF_Boruta', 'XGB_Boruta']
+    all_methods = ['True_Model', 'CGA_HDBIC', 'Lasso', 'Adaptive_Lasso', 'RF', 'XGB', 'Boruta_RF', 'Boruta_XGB']
 
     print("=" * 80)
     print("Baseline methods simulation - 4 configurations")
     print("=" * 80)
-    print(f"Methods: {len(all_methods)} baseline methods")
+    print(f"Methods: {len(all_methods)} methods total")
+    print(f"  - True Model (Bayes Optimal) (1 method)")
+    print(f"  - CGA+HDBIC (traditional CGA without cuts) (1 method)")
     print(f"  - Penalized: Lasso, Adaptive Lasso (2 methods)")
-    print(f"  - Tree-based: RF, XGB, RF+Boruta, XGB+Boruta (4 methods)")
+    print(f"  - Tree-based: RF, XGB, Boruta+RF, Boruta+XGB (4 methods)")
     print()
 
     # Define 4 simulation configurations
